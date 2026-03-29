@@ -21,6 +21,29 @@ spec:
         image: ollama/ollama:latest
         ports:
         - containerPort: 11434
+                # 新增：挂载持久存储（模型存在这里，永不丢失）
+        volumeMounts:
+        - name: ollama-data
+          mountPath: /root/.ollama
+      # 新增：关联持久卷
+      volumes:
+      - name: ollama-data
+        persistentVolumeClaim:
+          claimName: ollama-pvc
+---
+# 新增：持久化存储声明
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-pvc
+  namespace: ai-services
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: openebs-hostpath
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service
