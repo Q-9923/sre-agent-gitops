@@ -10,6 +10,8 @@ metadata:
   namespace: ai-services
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app: ollama }
   template:
@@ -18,9 +20,18 @@ spec:
     spec:
       containers:
       - name: ollama
-        image: ollama/ollama:latest
+#        image: ollama/ollama:latest#最开始部署时下载最新镜像
+	image: ollama/ollama@sha256:4dea9fb511947e24a84237bb636b0203abcb2ff0d3fbc7b4ff865deb91362131
+	imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 11434
+          - containerPort: 11434
+	volumeMounts:
+  	  - name: ollama-models
+    	    mountPath: /root/.ollama
+      volumes:
+        - name: ollama-models
+          persistentVolumeClaim:
+            claimName: ollama-models
 ---
 apiVersion: v1
 kind: Service
