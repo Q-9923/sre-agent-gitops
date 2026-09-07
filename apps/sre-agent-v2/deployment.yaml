@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sre-agent-v2-shadow
+  namespace: sre-agent-system
+  labels:
+    app.kubernetes.io/name: sre-agent-v2
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/version: v2.0.0-shadow.1
+spec:
+  replicas: 1
+
+  # 当前版本没有 Leader Election，避免滚动更新期间同时运行两个 Agent。
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sre-agent-v2
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sre-agent-v2
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/version: v2.0.0-shadow.1
+    spec:
+      serviceAccountName: sre-agent-v2
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 30
+
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: sre-agent
+          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.1-6bcaa5f94bce@sha256:48c25661bce8d2c673518f84746689f1183f48c204bf95daa881173503f35bd6
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: SRE_CLUSTER_NAME
+              value: "dev"
+
+            - name: PROMETHEUS_URL
+              value: "http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090"
+
+            - name: OLLAMA_URL
+              value: "http://ollama-service.ai-services.svc:11434"
+
+            - name: OLLAMA_MODEL
+              value: "qwen3.5:4b-q4_K_M"
+
+            - name: ALLOWED_NAMESPACES
+              value: "sre-agent-lab"
+
+            - name: ALLOWED_CONTROLLER_KINDS
+              value: "ReplicaSet"
+
+            # Shadow 建议模式：禁止执行重启。
+            - name: RESTART_POD_APPROVED
+              value: "false"
+
+            - name: MINIMUM_CONFIDENCE
+              value: "0.90"
+
+            - name: POLL_INTERVAL
+              value: "30s"
+
+            - name: RESTART_COOLDOWN
+              value: "10m"
+
+            - name: ATTEMPT_WINDOW
+              value: "1h"
+
+            - name: MAXIMUM_ATTEMPTS
+              value: "1"
+
+            - name: PROMETHEUS_TIMEOUT
+              value: "10s"
+
+            - name: OLLAMA_TIMEOUT
+              value: "120s"
+
+            - name: KUBERNETES_REQUEST_TIMEOUT
+              value: "15s"
+
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
