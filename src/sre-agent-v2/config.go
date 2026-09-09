@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -25,6 +26,7 @@ type agentConfig struct {
 	PrometheusTimeout        time.Duration
 	OllamaTimeout            time.Duration
 	KubernetesRequestTimeout time.Duration
+	HealthAddress            string
 }
 
 func loadConfig() (agentConfig, error) {
@@ -44,6 +46,7 @@ func loadConfig() (agentConfig, error) {
 		PrometheusTimeout:        10 * time.Second,
 		OllamaTimeout:            90 * time.Second,
 		KubernetesRequestTimeout: 15 * time.Second,
+		HealthAddress:            envOrDefault("HEALTH_ADDRESS", ":8080"),
 	}
 
 	var err error
@@ -81,6 +84,12 @@ func (config agentConfig) validate() error {
 	}
 	if strings.TrimSpace(config.OllamaModel) == "" {
 		return fmt.Errorf("OLLAMA_MODEL must not be empty")
+	}
+	if _, _, err := net.SplitHostPort(config.HealthAddress); err != nil {
+		return fmt.Errorf(
+			"HEALTH_ADDRESS must use host:port format such as :8080: %w",
+			err,
+		)
 	}
 	for name, value := range map[string]string{
 		"PROMETHEUS_URL": config.PrometheusURL,
