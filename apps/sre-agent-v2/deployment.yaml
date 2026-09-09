@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: sre-agent-v2
     app.kubernetes.io/component: agent
-    app.kubernetes.io/version: v2.0.0-shadow.1
+    app.kubernetes.io/version: v2.0.0-shadow.2
 spec:
   replicas: 1
 
@@ -23,7 +23,7 @@ spec:
       labels:
         app.kubernetes.io/name: sre-agent-v2
         app.kubernetes.io/component: agent
-        app.kubernetes.io/version: v2.0.0-shadow.1
+        app.kubernetes.io/version: v2.0.0-shadow.2
     spec:
       serviceAccountName: sre-agent-v2
       automountServiceAccountToken: true
@@ -41,8 +41,13 @@ spec:
 
       containers:
         - name: sre-agent
-          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.1-6bcaa5f94bce@sha256:48c25661bce8d2c673518f84746689f1183f48c204bf95daa881173503f35bd6
+          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.2-7bbcf0f896bc@sha256:d95696c150eedd6a79f820d48751ac5f2b48e9178f70f4da113afbf41a3f094c
           imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
 
           env:
             - name: SRE_CLUSTER_NAME
@@ -56,6 +61,9 @@ spec:
 
             - name: OLLAMA_MODEL
               value: "qwen3.5:4b-q4_K_M"
+
+            - name: HEALTH_ADDRESS
+              value: ":8080"
 
             - name: ALLOWED_NAMESPACES
               value: "sre-agent-lab"
@@ -90,6 +98,26 @@ spec:
 
             - name: KUBERNETES_REQUEST_TIMEOUT
               value: "15s"
+
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: health
+              scheme: HTTP
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+            successThreshold: 1
+
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
 
           resources:
             requests:
