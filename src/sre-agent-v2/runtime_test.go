@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -32,7 +33,9 @@ func TestRunApplicationServesLivenessAndStopsWithContext(t *testing.T) {
 
 	applicationDone := make(chan error, 1)
 	go func() {
-		applicationDone <- runApplication(ctx, listener, runAgent)
+		applicationDone <- runApplication(ctx, listener, runAgent, func() bool {
+			return false
+		})
 	}()
 
 	select {
@@ -84,5 +87,91 @@ func TestRunApplicationServesLivenessAndStopsWithContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("runApplication() did not stop after context cancellation")
+	}
+}
+
+func TestRunApplicationReflectsReadinessChanges(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = listener.Close()
+	})
+
+	var ready atomic.Bool
+
+	applicationDone := make(chan error, 1)
+	go func() {
+		applicationDone <- runApplication(
+			ctx,
+			listener,
+			func(agentContext context.Context) {
+				<-agentContext.Done()
+			},
+			ready.Load,
+		)
+	}()
+
+	client := &http.Client{Timeout: time.Second}
+	endpoint := "http://" + listener.Addr().String() + "/readyz"
+
+	getReadiness := func() (int, string) {
+		t.Helper()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			response, requestErr := client.Get(endpoint)
+			if requestErr == nil {
+				body, readErr := io.ReadAll(response.Body)
+				_ = response.Body.Close()
+				if readErr != nil {
+					t.Fatalf("read readiness response: %v", readErr)
+				}
+				return response.StatusCode, string(body)
+			}
+
+			if time.Now().After(deadline) {
+				t.Fatalf("GET %s failed: %v", endpoint, requestErr)
+			}
+
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	status, body := getReadiness()
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"initial status = %d; want %d",
+			status,
+			http.StatusServiceUnavailable,
+		)
+	}
+	if body != "not ready\n" {
+		t.Fatalf("initial body = %q; want %q", body, "not ready\n")
+	}
+
+	ready.Store(true)
+
+	status, body = getReadiness()
+	if status != http.StatusOK {
+		t.Fatalf("ready status = %d; want %d", status, http.StatusOK)
+	}
+	if body != "ok\n" {
+		t.Fatalf("ready body = %q; want %q", body, "ok\n")
+	}
+
+	cancel()
+
+	select {
+	case err := <-applicationDone:
+		if err != nil {
+			t.Fatalf("runApplication() error = %v; want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runApplication() did not stop after cancellation")
 	}
 }

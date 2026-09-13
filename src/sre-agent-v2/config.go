@@ -20,6 +20,7 @@ type agentConfig struct {
 	RestartPodApproved       bool
 	MinimumConfidence        float64
 	PollInterval             time.Duration
+	ReadinessStaleAfter      time.Duration
 	RestartCooldown          time.Duration
 	AttemptWindow            time.Duration
 	MaximumAttempts          int
@@ -40,6 +41,7 @@ func loadConfig() (agentConfig, error) {
 		RestartPodApproved:       false,
 		MinimumConfidence:        0.90,
 		PollInterval:             30 * time.Second,
+		ReadinessStaleAfter:      5 * time.Minute,
 		RestartCooldown:          10 * time.Minute,
 		AttemptWindow:            time.Hour,
 		MaximumAttempts:          1,
@@ -61,6 +63,7 @@ func loadConfig() (agentConfig, error) {
 	}
 	for name, destination := range map[string]*time.Duration{
 		"POLL_INTERVAL":              &config.PollInterval,
+		"READINESS_STALE_AFTER":      &config.ReadinessStaleAfter,
 		"RESTART_COOLDOWN":           &config.RestartCooldown,
 		"ATTEMPT_WINDOW":             &config.AttemptWindow,
 		"PROMETHEUS_TIMEOUT":         &config.PrometheusTimeout,
@@ -114,6 +117,7 @@ func (config agentConfig) validate() error {
 	}
 	for name, value := range map[string]time.Duration{
 		"POLL_INTERVAL":              config.PollInterval,
+		"READINESS_STALE_AFTER":      config.ReadinessStaleAfter,
 		"RESTART_COOLDOWN":           config.RestartCooldown,
 		"ATTEMPT_WINDOW":             config.AttemptWindow,
 		"PROMETHEUS_TIMEOUT":         config.PrometheusTimeout,

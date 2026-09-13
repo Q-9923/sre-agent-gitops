@@ -27,29 +27,35 @@ type decisionSource interface {
 }
 
 type sreAgent struct {
-	config     agentConfig
-	kubernetes kubernetes.Interface
-	collector  podContextSource
-	prometheus firingAlertSource
-	ollama     decisionSource
-	memory     *remediationMemory
-	logger     *slog.Logger
-	now        func() time.Time
+	config              agentConfig
+	kubernetes          kubernetes.Interface
+	collector           podContextSource
+	prometheus          firingAlertSource
+	ollama              decisionSource
+	memory              *remediationMemory
+	logger              *slog.Logger
+	now                 func() time.Time
+	markSuccessfulCycle func()
 }
 
-func newSREAgent(config agentConfig, kubernetesClient kubernetes.Interface, logger *slog.Logger) *sreAgent {
+func newSREAgent(
+	config agentConfig,
+	kubernetesClient kubernetes.Interface,
+	logger *slog.Logger,
+	markSuccessfulCycle func(),
+) *sreAgent {
 	return &sreAgent{
-		config:     config,
-		kubernetes: kubernetesClient,
-		collector:  newKubernetesContextCollector(kubernetesClient),
-		prometheus: newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
-		ollama:     newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
-		memory:     newRemediationMemory(),
-		logger:     logger,
-		now:        time.Now,
+		config:              config,
+		kubernetes:          kubernetesClient,
+		collector:           newKubernetesContextCollector(kubernetesClient),
+		prometheus:          newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
+		ollama:              newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
+		memory:              newRemediationMemory(),
+		logger:              logger,
+		now:                 time.Now,
+		markSuccessfulCycle: markSuccessfulCycle,
 	}
 }
-
 func (agent *sreAgent) run(ctx context.Context) {
 	agent.runCycle(ctx)
 
@@ -111,6 +117,9 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 		"invalid_total", invalidTotal,
 		"duration_ms", agent.now().Sub(startedAt).Milliseconds(),
 	)
+	if agent.markSuccessfulCycle != nil {
+		agent.markSuccessfulCycle()
+	}
 }
 
 func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {

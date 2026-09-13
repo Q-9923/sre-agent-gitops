@@ -11,7 +11,7 @@ import (
 
 const healthShutdownTimeout = 5 * time.Second
 
-func newHealthHandler() http.Handler {
+func newHealthHandler(isReady func() bool) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/livez", func(response http.ResponseWriter, _ *http.Request) {
@@ -19,13 +19,27 @@ func newHealthHandler() http.Handler {
 		response.WriteHeader(http.StatusOK)
 		_, _ = response.Write([]byte("ok\n"))
 	})
+	mux.HandleFunc("/readyz", func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set(
+			"Content-Type",
+			"text/plain; charset=utf-8",
+		)
 
+		if !isReady() {
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = response.Write([]byte("not ready\n"))
+			return
+		}
+
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write([]byte("ok\n"))
+	})
 	return mux
 }
 
-func runHealthServer(ctx context.Context, listener net.Listener) error {
+func runHealthServer(ctx context.Context, listener net.Listener, isReady func() bool) error {
 	server := &http.Server{
-		Handler:           newHealthHandler(),
+		Handler:           newHealthHandler(isReady),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

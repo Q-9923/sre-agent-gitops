@@ -95,3 +95,95 @@ func (source *stubDecisionSource) decide(_ context.Context, evidence IncidentEvi
 	source.received = evidence
 	return source.decision, source.err
 }
+
+func TestRunCycleMarksReadinessAfterSuccessfulPrometheusQuery(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		9,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	readiness := newReadinessState(
+		time.Minute,
+		func() time.Time {
+			return observedAt
+		},
+	)
+
+	agent := &sreAgent{
+		prometheus: &stubFiringAlertSource{},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now: func() time.Time {
+			return observedAt
+		},
+		markSuccessfulCycle: readiness.markSuccessfulCycle,
+	}
+
+	agent.runCycle(context.Background())
+
+	if !readiness.isReady() {
+		t.Fatal("readiness after successful Agent cycle = false; want true")
+	}
+}
+
+type stubFiringAlertSource struct {
+	alerts []Alert
+	err    error
+}
+
+func (source *stubFiringAlertSource) firingAlerts(
+	context.Context,
+) ([]Alert, error) {
+	return source.alerts, source.err
+}
+
+func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		9,
+		12,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	readiness := newReadinessState(
+		time.Minute,
+		func() time.Time {
+			return observedAt
+		},
+	)
+
+	config := agentConfig{
+		PrometheusURL:     "http://prometheus.test",
+		OllamaURL:         "http://ollama.test",
+		OllamaModel:       "test-model",
+		PrometheusTimeout: time.Second,
+		OllamaTimeout:     time.Second,
+	}
+
+	agent := newSREAgent(
+		config,
+		fake.NewSimpleClientset(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		readiness.markSuccessfulCycle,
+	)
+
+	agent.prometheus = &stubFiringAlertSource{}
+	agent.now = func() time.Time {
+		return observedAt
+	}
+
+	agent.runCycle(context.Background())
+
+	if !readiness.isReady() {
+		t.Fatal("readiness after constructed Agent cycle = false; want true")
+	}
+}

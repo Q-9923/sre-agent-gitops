@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -65,9 +66,24 @@ func main() {
 		"health_address", config.HealthAddress,
 		"restart_pod_approved", config.RestartPodApproved,
 	)
+	readiness := newReadinessState(
+		config.ReadinessStaleAfter,
+		time.Now,
+	)
 
-	agent := newSREAgent(config, kubernetesClient, logger)
-	if err := runApplication(ctx, healthListener, agent.run); err != nil {
+	agent := newSREAgent(
+		config,
+		kubernetesClient,
+		logger,
+		readiness.markSuccessfulCycle,
+	)
+
+	if err := runApplication(
+		ctx,
+		healthListener,
+		agent.run,
+		readiness.isReady,
+	); err != nil {
 		logger.Error(
 			"application_failed",
 			"result", "FATAL",
