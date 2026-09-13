@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: sre-agent-v2
     app.kubernetes.io/component: agent
-    app.kubernetes.io/version: v2.0.0-shadow.2
+    app.kubernetes.io/version: v2.0.0-shadow.3
 spec:
   replicas: 1
 
@@ -23,7 +23,7 @@ spec:
       labels:
         app.kubernetes.io/name: sre-agent-v2
         app.kubernetes.io/component: agent
-        app.kubernetes.io/version: v2.0.0-shadow.2
+        app.kubernetes.io/version: v2.0.0-shadow.3
     spec:
       serviceAccountName: sre-agent-v2
       automountServiceAccountToken: true
@@ -41,7 +41,7 @@ spec:
 
       containers:
         - name: sre-agent
-          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.2-7bbcf0f896bc@sha256:d95696c150eedd6a79f820d48751ac5f2b48e9178f70f4da113afbf41a3f094c
+          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.3-e27c0ac457d8@sha256:3d2249de2b83e9b396e7d40b70d6ae0d61e786cd9f50c22c7a1e11c462e6bf02
           imagePullPolicy: IfNotPresent
 
           ports:
@@ -81,6 +81,9 @@ spec:
             - name: POLL_INTERVAL
               value: "30s"
 
+            - name: READINESS_STALE_AFTER
+              value: "5m"
+
             - name: RESTART_COOLDOWN
               value: "10m"
 
@@ -107,6 +110,16 @@ spec:
             periodSeconds: 2
             timeoutSeconds: 1
             failureThreshold: 30
+            successThreshold: 1
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+              scheme: HTTP
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
             successThreshold: 1
 
           livenessProbe:
