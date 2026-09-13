@@ -34,6 +34,8 @@ func TestRunApplicationServesLivenessAndStopsWithContext(t *testing.T) {
 	applicationDone := make(chan error, 1)
 	go func() {
 		applicationDone <- runApplication(ctx, listener, runAgent, func() bool {
+			return true
+		}, func() bool {
 			return false
 		})
 	}()
@@ -112,6 +114,9 @@ func TestRunApplicationReflectsReadinessChanges(t *testing.T) {
 			func(agentContext context.Context) {
 				<-agentContext.Done()
 			},
+			func() bool {
+				return true
+			},
 			ready.Load,
 		)
 	}()
@@ -162,6 +167,80 @@ func TestRunApplicationReflectsReadinessChanges(t *testing.T) {
 	}
 	if body != "ok\n" {
 		t.Fatalf("ready body = %q; want %q", body, "ok\n")
+	}
+
+	cancel()
+
+	select {
+	case err := <-applicationDone:
+		if err != nil {
+			t.Fatalf("runApplication() error = %v; want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runApplication() did not stop after cancellation")
+	}
+}
+
+func TestRunApplicationReflectsLivenessChanges(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var live atomic.Bool
+	live.Store(true)
+
+	applicationDone := make(chan error, 1)
+	go func() {
+		applicationDone <- runApplication(
+			ctx,
+			listener,
+			func(agentContext context.Context) {
+				<-agentContext.Done()
+			},
+			live.Load,
+			func() bool {
+				return true
+			},
+		)
+	}()
+
+	client := &http.Client{
+		Timeout: time.Second,
+	}
+	livezURL := "http://" + listener.Addr().String() + "/livez"
+
+	response, err := client.Get(livezURL)
+	if err != nil {
+		t.Fatalf("GET live /livez error = %v", err)
+	}
+	_ = response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf(
+			"live status = %d; want %d",
+			response.StatusCode,
+			http.StatusOK,
+		)
+	}
+
+	live.Store(false)
+
+	response, err = client.Get(livezURL)
+	if err != nil {
+		t.Fatalf("GET stale /livez error = %v", err)
+	}
+	_ = response.Body.Close()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"stale status = %d; want %d",
+			response.StatusCode,
+			http.StatusServiceUnavailable,
+		)
 	}
 
 	cancel()

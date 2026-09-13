@@ -48,3 +48,20 @@ func TestLoadConfigReadsReadinessStaleAfter(t *testing.T) {
 		)
 	}
 }
+
+func TestLoadConfigReadsLivenessStaleAfter(t *testing.T) {
+	t.Setenv("LIVENESS_STALE_AFTER", "7m")
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v; want nil", err)
+	}
+
+	if config.LivenessStaleAfter != 7*time.Minute {
+		t.Fatalf(
+			"LivenessStaleAfter = %s; want %s",
+			config.LivenessStaleAfter,
+			7*time.Minute,
+		)
+	}
+}

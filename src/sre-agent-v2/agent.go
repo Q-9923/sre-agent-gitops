@@ -35,6 +35,7 @@ type sreAgent struct {
 	memory              *remediationMemory
 	logger              *slog.Logger
 	now                 func() time.Time
+	markCycleProgress   func()
 	markSuccessfulCycle func()
 }
 
@@ -42,6 +43,7 @@ func newSREAgent(
 	config agentConfig,
 	kubernetesClient kubernetes.Interface,
 	logger *slog.Logger,
+	markCycleProgress func(),
 	markSuccessfulCycle func(),
 ) *sreAgent {
 	return &sreAgent{
@@ -53,6 +55,7 @@ func newSREAgent(
 		memory:              newRemediationMemory(),
 		logger:              logger,
 		now:                 time.Now,
+		markCycleProgress:   markCycleProgress,
 		markSuccessfulCycle: markSuccessfulCycle,
 	}
 }
@@ -73,6 +76,17 @@ func (agent *sreAgent) run(ctx context.Context) {
 }
 
 func (agent *sreAgent) runCycle(ctx context.Context) {
+
+	if agent.markCycleProgress != nil {
+		agent.markCycleProgress()
+	}
+
+	defer func() {
+		if agent.markCycleProgress != nil {
+			agent.markCycleProgress()
+		}
+	}()
+
 	startedAt := agent.now()
 	alerts, err := agent.prometheus.firingAlerts(ctx)
 	if err != nil {
@@ -102,6 +116,9 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 		}
 		actionableTotal++
 		agent.handlePodCrashLooping(ctx, alert)
+		if agent.markCycleProgress != nil {
+			agent.markCycleProgress()
+		}
 	}
 
 	result := "PROCESSED"

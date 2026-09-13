@@ -16,6 +16,8 @@ func TestHealthHandlerReturnsOKForLiveness(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	newHealthHandler(func() bool {
+		return true
+	}, func() bool {
 		return false
 	}).ServeHTTP(response, request)
 
@@ -59,6 +61,8 @@ func TestHealthServerServesLivenessAndStopsWithContext(t *testing.T) {
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- runHealthServer(ctx, listener, func() bool {
+			return true
+		}, func() bool {
 			return false
 		})
 	}()
@@ -111,6 +115,8 @@ func TestHealthServerServesLivenessAndStopsWithContext(t *testing.T) {
 
 func TestHealthHandlerReturnsServiceUnavailableBeforeReady(t *testing.T) {
 	handler := newHealthHandler(func() bool {
+		return true
+	}, func() bool {
 		return false
 	})
 
@@ -144,6 +150,8 @@ func TestHealthHandlerReturnsServiceUnavailableBeforeReady(t *testing.T) {
 
 func TestHealthHandlerReturnsOKWhenReady(t *testing.T) {
 	handler := newHealthHandler(func() bool {
+		return true
+	}, func() bool {
 		return true
 	})
 
@@ -191,7 +199,9 @@ func TestHealthServerReflectsReadinessChanges(t *testing.T) {
 
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- runHealthServer(ctx, listener, ready.Load)
+		serverDone <- runHealthServer(ctx, listener, func() bool {
+			return true
+		}, ready.Load)
 	}()
 
 	client := &http.Client{Timeout: time.Second}
@@ -243,6 +253,113 @@ func TestHealthServerReflectsReadinessChanges(t *testing.T) {
 	}
 	if body != "ok\n" {
 		t.Fatalf("ready body = %q; want %q", body, "ok\n")
+	}
+
+	cancel()
+
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("runHealthServer() error = %v; want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runHealthServer() did not stop after cancellation")
+	}
+}
+
+func TestHealthHandlerReturnsServiceUnavailableWhenNotLive(t *testing.T) {
+	handler := newHealthHandler(
+		func() bool {
+			return false
+		},
+		func() bool {
+			return true
+		},
+	)
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/livez",
+		nil,
+	)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"status = %d; want %d",
+			response.Code,
+			http.StatusServiceUnavailable,
+		)
+	}
+
+	if response.Body.String() != "not live\n" {
+		t.Fatalf(
+			"body = %q; want %q",
+			response.Body.String(),
+			"not live\n",
+		)
+	}
+}
+
+func TestHealthServerReflectsLivenessChanges(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var live atomic.Bool
+	live.Store(true)
+
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- runHealthServer(
+			ctx,
+			listener,
+			live.Load,
+			func() bool {
+				return true
+			},
+		)
+	}()
+
+	client := &http.Client{
+		Timeout: time.Second,
+	}
+	livezURL := "http://" + listener.Addr().String() + "/livez"
+
+	response, err := client.Get(livezURL)
+	if err != nil {
+		t.Fatalf("GET live /livez error = %v", err)
+	}
+	_ = response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf(
+			"live status = %d; want %d",
+			response.StatusCode,
+			http.StatusOK,
+		)
+	}
+
+	live.Store(false)
+
+	response, err = client.Get(livezURL)
+	if err != nil {
+		t.Fatalf("GET stale /livez error = %v", err)
+	}
+	_ = response.Body.Close()
+
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"stale status = %d; want %d",
+			response.StatusCode,
+			http.StatusServiceUnavailable,
+		)
 	}
 
 	cancel()

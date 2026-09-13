@@ -66,6 +66,10 @@ func main() {
 		"health_address", config.HealthAddress,
 		"restart_pod_approved", config.RestartPodApproved,
 	)
+	liveness := newLivenessState(
+		config.LivenessStaleAfter,
+		time.Now,
+	)
 	readiness := newReadinessState(
 		config.ReadinessStaleAfter,
 		time.Now,
@@ -75,6 +79,7 @@ func main() {
 		config,
 		kubernetesClient,
 		logger,
+		liveness.markProgress,
 		readiness.markSuccessfulCycle,
 	)
 
@@ -82,6 +87,7 @@ func main() {
 		ctx,
 		healthListener,
 		agent.run,
+		liveness.isLive,
 		readiness.isReady,
 	); err != nil {
 		logger.Error(

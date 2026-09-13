@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -173,6 +174,7 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 		config,
 		fake.NewSimpleClientset(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		func() {},
 		readiness.markSuccessfulCycle,
 	)
 
@@ -185,5 +187,218 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 
 	if !readiness.isReady() {
 		t.Fatal("readiness after constructed Agent cycle = false; want true")
+	}
+}
+
+func TestRunCycleMarksLivenessProgressWhenPrometheusQueryFails(t *testing.T) {
+	currentTime := time.Date(
+		2026,
+		time.September,
+		13,
+		19,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	liveness := newLivenessState(
+		time.Minute,
+		func() time.Time {
+			return currentTime
+		},
+	)
+
+	currentTime = currentTime.Add(time.Minute + time.Nanosecond)
+
+	if liveness.isLive() {
+		t.Fatal("test setup liveness = true; want stale false")
+	}
+
+	readiness := newReadinessState(
+		time.Minute,
+		func() time.Time {
+			return currentTime
+		},
+	)
+
+	agent := &sreAgent{
+		prometheus: &stubFiringAlertSource{
+			err: errors.New("prometheus unavailable"),
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now: func() time.Time {
+			return currentTime
+		},
+		markCycleProgress:   liveness.markProgress,
+		markSuccessfulCycle: readiness.markSuccessfulCycle,
+	}
+
+	agent.runCycle(context.Background())
+
+	if !liveness.isLive() {
+		t.Fatal("liveness after failed cycle = false; want true")
+	}
+
+	if readiness.isReady() {
+		t.Fatal("readiness after failed Prometheus query = true; want false")
+	}
+}
+
+func TestNewSREAgentConnectsCycleProgressToLiveness(t *testing.T) {
+	currentTime := time.Date(
+		2026,
+		time.September,
+		13,
+		20,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	liveness := newLivenessState(
+		time.Minute,
+		func() time.Time {
+			return currentTime
+		},
+	)
+
+	currentTime = currentTime.Add(time.Minute + time.Nanosecond)
+
+	if liveness.isLive() {
+		t.Fatal("test setup liveness = true; want stale false")
+	}
+
+	config := agentConfig{
+		PrometheusURL:     "http://prometheus.test",
+		OllamaURL:         "http://ollama.test",
+		OllamaModel:       "test-model",
+		PrometheusTimeout: time.Second,
+		OllamaTimeout:     time.Second,
+	}
+
+	agent := newSREAgent(
+		config,
+		fake.NewSimpleClientset(),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		liveness.markProgress,
+		func() {},
+	)
+
+	agent.prometheus = &stubFiringAlertSource{
+		err: errors.New("prometheus unavailable"),
+	}
+	agent.now = func() time.Time {
+		return currentTime
+	}
+
+	agent.runCycle(context.Background())
+
+	if !liveness.isLive() {
+		t.Fatal("constructed Agent did not refresh liveness")
+	}
+}
+
+type progressObservingCollector struct {
+	calls            int
+	advance          func()
+	isLive           func() bool
+	liveAtSecondCall bool
+}
+
+func (collector *progressObservingCollector) collect(
+	_ context.Context,
+	_, _, _ string,
+) (PodEvidence, error) {
+	collector.calls++
+
+	if collector.calls == 1 {
+		collector.advance()
+	}
+
+	if collector.calls == 2 {
+		collector.liveAtSecondCall = collector.isLive()
+	}
+
+	return PodEvidence{}, errors.New(
+		"stop context collection for liveness test",
+	)
+}
+
+func TestRunCycleRefreshesLivenessBetweenActionableAlerts(t *testing.T) {
+	currentTime := time.Date(
+		2026,
+		time.September,
+		13,
+		23,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	liveness := newLivenessState(
+		time.Minute,
+		func() time.Time {
+			return currentTime
+		},
+	)
+
+	collector := &progressObservingCollector{
+		advance: func() {
+			currentTime = currentTime.Add(
+				time.Minute + time.Nanosecond,
+			)
+		},
+		isLive: liveness.isLive,
+	}
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			KubernetesRequestTimeout: time.Second,
+		},
+		collector: collector,
+		prometheus: &stubFiringAlertSource{
+			alerts: []Alert{
+				{
+					Labels: map[string]string{
+						"alertname": podCrashLoopingAlert,
+						"namespace": "default",
+						"pod":       "crash-app-a",
+					},
+				},
+				{
+					Labels: map[string]string{
+						"alertname": podCrashLoopingAlert,
+						"namespace": "default",
+						"pod":       "crash-app-b",
+					},
+				},
+			},
+		},
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return currentTime
+		},
+		markCycleProgress: liveness.markProgress,
+	}
+
+	agent.runCycle(context.Background())
+
+	if collector.calls != 2 {
+		t.Fatalf(
+			"collector calls = %d; want 2",
+			collector.calls,
+		)
+	}
+
+	if !collector.liveAtSecondCall {
+		t.Fatal(
+			"liveness before second alert = false; want true",
+		)
 	}
 }
