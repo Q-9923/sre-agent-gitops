@@ -59,23 +59,48 @@ func newSREAgent(
 		markSuccessfulCycle: markSuccessfulCycle,
 	}
 }
+
 func (agent *sreAgent) run(ctx context.Context) {
+	if ctx.Err() != nil {
+		agent.logger.Info(
+			"agent_stopped",
+			"result", "SHUTDOWN",
+		)
+		return
+	}
+
 	agent.runCycle(ctx)
 
 	ticker := time.NewTicker(agent.config.PollInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
-			agent.logger.Info("agent_stopped", "result", "SHUTDOWN")
+			agent.logger.Info(
+				"agent_stopped",
+				"result", "SHUTDOWN",
+			)
 			return
+
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				agent.logger.Info(
+					"agent_stopped",
+					"result", "SHUTDOWN",
+				)
+				return
+			}
+
 			agent.runCycle(ctx)
 		}
 	}
 }
 
 func (agent *sreAgent) runCycle(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 
 	if agent.markCycleProgress != nil {
 		agent.markCycleProgress()
@@ -90,6 +115,10 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 	startedAt := agent.now()
 	alerts, err := agent.prometheus.firingAlerts(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
 		agent.logger.Error(
 			"cycle_failed",
 			"result", "ERROR",

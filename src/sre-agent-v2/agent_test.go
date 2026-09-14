@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -400,5 +402,213 @@ func TestRunCycleRefreshesLivenessBetweenActionableAlerts(t *testing.T) {
 		t.Fatal(
 			"liveness before second alert = false; want true",
 		)
+	}
+}
+
+type countingAlertSourceForCanceledRun struct {
+	calls int
+}
+
+func (source *countingAlertSourceForCanceledRun) firingAlerts(
+	context.Context,
+) ([]Alert, error) {
+	source.calls++
+	return nil, nil
+}
+
+func TestSREAgentRunDoesNotStartCycleWhenContextAlreadyCanceled(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	alertSource := &countingAlertSourceForCanceledRun{}
+
+	agent := &sreAgent{
+		config: agentConfig{
+			PollInterval: time.Hour,
+		},
+		prometheus: alertSource,
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: time.Now,
+	}
+
+	agent.run(ctx)
+
+	if alertSource.calls != 0 {
+		t.Fatalf(
+			"Prometheus calls after cancellation = %d; want 0",
+			alertSource.calls,
+		)
+	}
+}
+
+func TestRunCycleDoesNotQueryPrometheusWhenContextCanceled(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	alertSource := &countingAlertSourceForCanceledRun{}
+
+	agent := &sreAgent{
+		prometheus: alertSource,
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: time.Now,
+	}
+
+	agent.runCycle(ctx)
+
+	if alertSource.calls != 0 {
+		t.Fatalf(
+			"Prometheus calls after cancellation = %d; want 0",
+			alertSource.calls,
+		)
+	}
+}
+
+type cancelingAlertSourceForShutdown struct {
+	cancel context.CancelFunc
+}
+
+func (source *cancelingAlertSourceForShutdown) firingAlerts(
+	ctx context.Context,
+) ([]Alert, error) {
+	source.cancel()
+	return nil, ctx.Err()
+}
+
+func TestRunCycleDoesNotLogFailureWhenPrometheusCallIsCanceledByShutdown(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		prometheus: &cancelingAlertSourceForShutdown{
+			cancel: cancel,
+		},
+		logger: slog.New(
+			slog.NewJSONHandler(&logOutput, nil),
+		),
+		now: time.Now,
+	}
+
+	agent.runCycle(ctx)
+
+	if strings.Contains(
+		logOutput.String(),
+		`"msg":"cycle_failed"`,
+	) {
+		t.Fatalf(
+			"runCycle logged cycle_failed for normal shutdown: %s",
+			logOutput.String(),
+		)
+	}
+}
+
+type failingAlertSourceForLogging struct{}
+
+func (*failingAlertSourceForLogging) firingAlerts(
+	context.Context,
+) ([]Alert, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestRunCycleLogsPrometheusFailureWhenApplicationContextIsActive(
+	t *testing.T,
+) {
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		prometheus: &failingAlertSourceForLogging{},
+		logger: slog.New(
+			slog.NewJSONHandler(&logOutput, nil),
+		),
+		now: time.Now,
+	}
+
+	agent.runCycle(context.Background())
+
+	output := logOutput.String()
+
+	for _, expected := range []string{
+		`"msg":"cycle_failed"`,
+		`"error_code":"PROMETHEUS_QUERY_FAILED"`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf(
+				"runCycle log = %s; want %s",
+				output,
+				expected,
+			)
+		}
+	}
+}
+
+type notifyingAlertSourceForRunLoop struct {
+	calls chan struct{}
+}
+
+func (source *notifyingAlertSourceForRunLoop) firingAlerts(
+	context.Context,
+) ([]Alert, error) {
+	source.calls <- struct{}{}
+	return nil, nil
+}
+
+func TestSREAgentRunContinuesProcessingUntilContextCanceled(
+	t *testing.T,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	alertSource := &notifyingAlertSourceForRunLoop{
+		calls: make(chan struct{}, 2),
+	}
+
+	agent := &sreAgent{
+		config: agentConfig{
+			PollInterval: time.Millisecond,
+		},
+		prometheus: alertSource,
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: time.Now,
+	}
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		agent.run(ctx)
+	}()
+
+	select {
+	case <-alertSource.calls:
+	case <-time.After(time.Second):
+		t.Fatal("first cycle did not run")
+	}
+
+	select {
+	case <-alertSource.calls:
+	case <-runDone:
+		t.Fatal("agent.run returned before the second cycle")
+	case <-time.After(time.Second):
+		t.Fatal("second cycle did not run")
+	}
+
+	cancel()
+
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("agent.run did not stop after cancellation")
 	}
 }
