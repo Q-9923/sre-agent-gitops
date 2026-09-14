@@ -132,6 +132,11 @@ func (config agentConfig) validate() error {
 			return fmt.Errorf("%s must be greater than zero", name)
 		}
 	}
+	if config.LivenessStaleAfter <= config.PollInterval {
+		return fmt.Errorf(
+			"LIVENESS_STALE_AFTER must be greater than POLL_INTERVAL",
+		)
+	}
 	return nil
 }
 

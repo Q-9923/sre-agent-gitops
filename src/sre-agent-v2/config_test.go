@@ -65,3 +65,41 @@ func TestLoadConfigReadsLivenessStaleAfter(t *testing.T) {
 		)
 	}
 }
+func TestLoadConfigRejectsLivenessStaleAfterNotGreaterThanPollInterval(t *testing.T) {
+	tests := []struct {
+		name               string
+		pollInterval       string
+		livenessStaleAfter string
+	}{
+		{
+			name:               "shorter",
+			pollInterval:       "1h",
+			livenessStaleAfter: "10s",
+		},
+		{
+			name:               "equal",
+			pollInterval:       "30s",
+			livenessStaleAfter: "30s",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("POLL_INTERVAL", test.pollInterval)
+			t.Setenv(
+				"LIVENESS_STALE_AFTER",
+				test.livenessStaleAfter,
+			)
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatalf(
+					"loadConfig() accepted POLL_INTERVAL=%s and "+
+						"LIVENESS_STALE_AFTER=%s; want an error",
+					test.pollInterval,
+					test.livenessStaleAfter,
+				)
+			}
+		})
+	}
+}
