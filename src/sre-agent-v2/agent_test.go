@@ -178,6 +178,7 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func() {},
 		readiness.markSuccessfulCycle,
+		func(string) {},
 	)
 
 	agent.prometheus = &stubFiringAlertSource{}
@@ -286,6 +287,7 @@ func TestNewSREAgentConnectsCycleProgressToLiveness(t *testing.T) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		liveness.markProgress,
 		func() {},
+		func(string) {},
 	)
 
 	agent.prometheus = &stubFiringAlertSource{
@@ -482,13 +484,14 @@ func (source *cancelingAlertSourceForShutdown) firingAlerts(
 	return nil, ctx.Err()
 }
 
-func TestRunCycleDoesNotLogFailureWhenPrometheusCallIsCanceledByShutdown(
+func TestRunCycleDoesNotLogFailureOrRecordErrorWhenPrometheusCallIsCanceledByShutdown(
 	t *testing.T,
 ) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	var logOutput bytes.Buffer
+	var recordedResults []string
 
 	agent := &sreAgent{
 		prometheus: &cancelingAlertSourceForShutdown{
@@ -498,6 +501,12 @@ func TestRunCycleDoesNotLogFailureWhenPrometheusCallIsCanceledByShutdown(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
 		now: time.Now,
+		recordCycleResult: func(result string) {
+			recordedResults = append(
+				recordedResults,
+				result,
+			)
+		},
 	}
 
 	agent.runCycle(ctx)
@@ -509,6 +518,13 @@ func TestRunCycleDoesNotLogFailureWhenPrometheusCallIsCanceledByShutdown(
 		t.Fatalf(
 			"runCycle logged cycle_failed for normal shutdown: %s",
 			logOutput.String(),
+		)
+	}
+
+	if len(recordedResults) != 0 {
+		t.Fatalf(
+			"recorded cycle results during shutdown = %v; want none",
+			recordedResults,
 		)
 	}
 }
@@ -610,5 +626,161 @@ func TestSREAgentRunContinuesProcessingUntilContextCanceled(
 	case <-runDone:
 	case <-time.After(time.Second):
 		t.Fatal("agent.run did not stop after cancellation")
+	}
+}
+
+func TestRunCycleRecordsNoActionResult(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		15,
+		21,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	var recordedResults []string
+
+	agent := &sreAgent{
+		prometheus: &stubFiringAlertSource{},
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return observedAt
+		},
+		recordCycleResult: func(result string) {
+			recordedResults = append(
+				recordedResults,
+				result,
+			)
+		},
+	}
+
+	agent.runCycle(context.Background())
+
+	if len(recordedResults) != 1 {
+		t.Fatalf(
+			"recorded cycle results = %v; want exactly one result",
+			recordedResults,
+		)
+	}
+
+	if recordedResults[0] != "NO_ACTION" {
+		t.Fatalf(
+			"recorded cycle result = %q; want NO_ACTION",
+			recordedResults[0],
+		)
+	}
+}
+
+func TestRunCycleRecordsErrorWhenPrometheusQueryFails(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		15,
+		22,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	var recordedResults []string
+
+	agent := &sreAgent{
+		prometheus: &stubFiringAlertSource{
+			err: errors.New("prometheus unavailable"),
+		},
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return observedAt
+		},
+		recordCycleResult: func(result string) {
+			recordedResults = append(
+				recordedResults,
+				result,
+			)
+		},
+	}
+
+	agent.runCycle(context.Background())
+
+	if len(recordedResults) != 1 {
+		t.Fatalf(
+			"recorded cycle results = %v; want exactly one result",
+			recordedResults,
+		)
+	}
+
+	if recordedResults[0] != "ERROR" {
+		t.Fatalf(
+			"recorded cycle result = %q; want ERROR",
+			recordedResults[0],
+		)
+	}
+}
+
+func TestNewSREAgentConnectsCycleResultRecorder(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		15,
+		23,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	config := agentConfig{
+		PrometheusURL:     "http://prometheus.test",
+		OllamaURL:         "http://ollama.test",
+		OllamaModel:       "test-model",
+		PrometheusTimeout: time.Second,
+		OllamaTimeout:     time.Second,
+	}
+
+	var recordedResults []string
+
+	agent := newSREAgent(
+		config,
+		fake.NewSimpleClientset(),
+		slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		func() {},
+		func() {},
+		func(result string) {
+			recordedResults = append(
+				recordedResults,
+				result,
+			)
+		},
+	)
+
+	agent.prometheus = &stubFiringAlertSource{}
+	agent.now = func() time.Time {
+		return observedAt
+	}
+
+	agent.runCycle(context.Background())
+
+	if len(recordedResults) != 1 {
+		t.Fatalf(
+			"recorded cycle results = %v; want exactly one result",
+			recordedResults,
+		)
+	}
+
+	if recordedResults[0] != "NO_ACTION" {
+		t.Fatalf(
+			"recorded cycle result = %q; want NO_ACTION",
+			recordedResults[0],
+		)
 	}
 }

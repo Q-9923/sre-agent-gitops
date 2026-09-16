@@ -33,11 +33,13 @@ func TestRunApplicationServesLivenessAndStopsWithContext(t *testing.T) {
 
 	applicationDone := make(chan error, 1)
 	go func() {
-		applicationDone <- runApplication(ctx, listener, runAgent, func() bool {
-			return true
-		}, func() bool {
-			return false
-		})
+		applicationDone <- runApplication(ctx, listener, runAgent, newHealthHandler(
+			func() bool {
+				return true
+			}, func() bool {
+				return false
+			}),
+		)
 	}()
 
 	select {
@@ -114,10 +116,12 @@ func TestRunApplicationReflectsReadinessChanges(t *testing.T) {
 			func(agentContext context.Context) {
 				<-agentContext.Done()
 			},
-			func() bool {
-				return true
-			},
-			ready.Load,
+			newHealthHandler(
+				func() bool {
+					return true
+				},
+				ready.Load,
+			),
 		)
 	}()
 
@@ -201,10 +205,12 @@ func TestRunApplicationReflectsLivenessChanges(t *testing.T) {
 			func(agentContext context.Context) {
 				<-agentContext.Done()
 			},
-			live.Load,
-			func() bool {
-				return true
-			},
+			newHealthHandler(
+				live.Load,
+				func() bool {
+					return true
+				},
+			),
 		)
 	}()
 

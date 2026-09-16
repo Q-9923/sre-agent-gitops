@@ -60,11 +60,14 @@ func TestHealthServerServesLivenessAndStopsWithContext(t *testing.T) {
 
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- runHealthServer(ctx, listener, func() bool {
-			return true
-		}, func() bool {
-			return false
-		})
+		serverDone <- runHealthServer(ctx, listener, newHealthHandler(
+			func() bool {
+				return true
+			},
+			func() bool {
+				return false
+			}),
+		)
 	}()
 
 	client := &http.Client{Timeout: time.Second}
@@ -199,9 +202,16 @@ func TestHealthServerReflectsReadinessChanges(t *testing.T) {
 
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- runHealthServer(ctx, listener, func() bool {
-			return true
-		}, ready.Load)
+		serverDone <- runHealthServer(
+			ctx,
+			listener,
+			newHealthHandler(
+				func() bool {
+					return true
+				},
+				ready.Load,
+			),
+		)
 	}()
 
 	client := &http.Client{Timeout: time.Second}
@@ -320,10 +330,12 @@ func TestHealthServerReflectsLivenessChanges(t *testing.T) {
 		serverDone <- runHealthServer(
 			ctx,
 			listener,
-			live.Load,
-			func() bool {
-				return true
-			},
+			newHealthHandler(
+				live.Load,
+				func() bool {
+					return true
+				},
+			),
 		)
 	}()
 

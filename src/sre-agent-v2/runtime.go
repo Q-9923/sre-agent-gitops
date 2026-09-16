@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
 )
 
 func runApplication(
 	ctx context.Context,
 	listener net.Listener,
 	runAgent func(context.Context),
-	isLive func() bool,
-	isReady func() bool,
+	handler http.Handler,
 ) error {
 	runtimeContext, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -23,7 +23,11 @@ func runApplication(
 
 	healthDone := make(chan error, 1)
 	go func() {
-		healthDone <- runHealthServer(runtimeContext, listener, isLive, isReady)
+		healthDone <- runHealthServer(
+			runtimeContext,
+			listener,
+			handler,
+		)
 	}()
 
 	select {

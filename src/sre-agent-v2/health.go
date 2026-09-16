@@ -58,9 +58,9 @@ func newHealthHandler(
 	return mux
 }
 
-func runHealthServer(ctx context.Context, listener net.Listener, isLive func() bool, isReady func() bool) error {
+func runHealthServer(ctx context.Context, listener net.Listener, handler http.Handler) error {
 	server := &http.Server{
-		Handler:           newHealthHandler(isLive, isReady),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

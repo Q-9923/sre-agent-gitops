@@ -37,6 +37,7 @@ type sreAgent struct {
 	now                 func() time.Time
 	markCycleProgress   func()
 	markSuccessfulCycle func()
+	recordCycleResult   func(string)
 }
 
 func newSREAgent(
@@ -45,6 +46,7 @@ func newSREAgent(
 	logger *slog.Logger,
 	markCycleProgress func(),
 	markSuccessfulCycle func(),
+	recordCycleResult func(string),
 ) *sreAgent {
 	return &sreAgent{
 		config:              config,
@@ -57,6 +59,7 @@ func newSREAgent(
 		now:                 time.Now,
 		markCycleProgress:   markCycleProgress,
 		markSuccessfulCycle: markSuccessfulCycle,
+		recordCycleResult:   recordCycleResult,
 	}
 }
 
@@ -126,6 +129,9 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 			"duration_ms", agent.now().Sub(startedAt).Milliseconds(),
 			"error", err,
 		)
+		if agent.recordCycleResult != nil {
+			agent.recordCycleResult("ERROR")
+		}
 		return
 	}
 
@@ -163,6 +169,9 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 		"invalid_total", invalidTotal,
 		"duration_ms", agent.now().Sub(startedAt).Milliseconds(),
 	)
+	if agent.recordCycleResult != nil {
+		agent.recordCycleResult(result)
+	}
 	if agent.markSuccessfulCycle != nil {
 		agent.markSuccessfulCycle()
 	}

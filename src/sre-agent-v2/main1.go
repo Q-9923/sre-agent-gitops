@@ -74,21 +74,27 @@ func main() {
 		config.ReadinessStaleAfter,
 		time.Now,
 	)
+	metrics := newAgentMetrics()
 
+	operationalHandler := newOperationalHandler(
+		liveness.isLive,
+		readiness.isReady,
+		metrics.handler(),
+	)
 	agent := newSREAgent(
 		config,
 		kubernetesClient,
 		logger,
 		liveness.markProgress,
 		readiness.markSuccessfulCycle,
+		metrics.recordCycle,
 	)
 
 	if err := runApplication(
 		ctx,
 		healthListener,
 		agent.run,
-		liveness.isLive,
-		readiness.isReady,
+		operationalHandler,
 	); err != nil {
 		logger.Error(
 			"application_failed",
