@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sre-agent-v2
+  namespace: sre-agent-system
+  labels:
+    app.kubernetes.io/name: sre-agent-v2
+    app.kubernetes.io/component: monitoring
+    release: prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - sre-agent-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sre-agent-v2
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s
