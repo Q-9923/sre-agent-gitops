@@ -71,6 +71,27 @@ sre_agent_cycles_total{result="<RESULT>"}
 ```bash
 apps/sre-agent-v2/scripts/test-prometheus-rules.sh
 ```
+## Grafana Dashboard
+
+`apps/sre-agent-v2/grafana-dashboard.yaml` 以 ConfigMap 形式提供 `SRE Agent v2 Operations` 仪表盘。Grafana dashboard sidecar 通过 `grafana_dashboard: "1"` 标签发现该资源，并使用 UID 为 `prometheus` 的 Prometheus datasource。
+
+仪表盘包含：
+
+- `Metrics Target`：显示 Metrics 采集目标是否在线；
+- `Cycle Errors (5m)`：显示最近 5 分钟失败周期数；
+- `Total Cycles by Result`：按有限枚举的 `result` 标签显示累计周期；
+- `Cycle Rate by Result`：显示不同周期结果的处理速率；
+- `Go Goroutines`：显示 Agent 进程的 goroutine 数量。
+
+仪表盘只读取已有的低基数指标，不增加 Agent 权限、网络端口或自动修复动作。
+
+Dashboard ConfigMap 和 JSON 契约可以通过以下命令验证：
+
+```bash
+apps/sre-agent-v2/scripts/test-grafana-dashboard.sh
+```
+
+
 
 ## 本地验证
 

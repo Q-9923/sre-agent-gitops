@@ -1,0 +1,26 @@
+rule_files: []
+
+evaluation_interval: 1m
+
+tests:
+  - name: Metrics target is present
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}'
+        values: '1'
+    promql_expr_test:
+      - expr: 'max(up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}) or vector(0)'
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 1
+
+  - name: Metrics target disappears completely
+    interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: 'max(up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}) or vector(0)'
+        eval_time: 0m
+        exp_samples:
+          - labels: '{}'
+            value: 0
