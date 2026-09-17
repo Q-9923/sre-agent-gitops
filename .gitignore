@@ -1,3 +1,4 @@
 /src/sre-agent-v2/bin/
 /src/sre-agent-v2/logs/
 /src/sre-agent-v2/*.log
+/apps/sre-agent-v2/.tmp/

@@ -1,0 +1,87 @@
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: SRE Agent metrics target remains unavailable
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}'
+        values: '1 0 0 0 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts:
+          - exp_labels:
+              component: sre-agent-v2
+              namespace: sre-agent-system
+              service: sre-agent-v2-metrics
+              severity: warning
+            exp_annotations:
+              summary: SRE Agent metrics target is unavailable
+              description: Prometheus cannot scrape the SRE Agent metrics target in namespace sre-agent-system.
+      - eval_time: 4m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts: []
+
+  - name: SRE Agent metrics target disappears from discovery
+    interval: 1m
+    input_series:
+      - series: 'up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}'
+        values: '1 stale _ _ 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts:
+          - exp_labels:
+              component: sre-agent-v2
+              namespace: sre-agent-system
+              service: sre-agent-v2-metrics
+              severity: warning
+            exp_annotations:
+              summary: SRE Agent metrics target is unavailable
+              description: Prometheus cannot scrape the SRE Agent metrics target in namespace sre-agent-system.
+      - eval_time: 4m
+        alertname: SREAgentMetricsTargetDown
+        exp_alerts: []
+
+  - name: SRE Agent cycle errors remain below threshold
+    interval: 1m
+    input_series:
+      - series: 'sre_agent_cycles_total{namespace="sre-agent-system",service="sre-agent-v2-metrics",result="ERROR"}'
+        values: '0 0 0 0 0 2 2 2'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: SREAgentCycleErrorsIncreasing
+        exp_alerts: []
+
+  - name: SRE Agent cycle errors cross threshold and recover
+    interval: 1m
+    input_series:
+      - series: 'sre_agent_cycles_total{namespace="sre-agent-system",service="sre-agent-v2-metrics",result="ERROR"}'
+        values: '0 0 0 0 0 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SREAgentCycleErrorsIncreasing
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SREAgentCycleErrorsIncreasing
+        exp_alerts:
+          - exp_labels:
+              component: sre-agent-v2
+              namespace: sre-agent-system
+              service: sre-agent-v2-metrics
+              severity: warning
+            exp_annotations:
+              summary: SRE Agent cycle errors are increasing
+              description: SRE Agent recorded at least three failed cycles during the last five minutes.
+      - eval_time: 10m
+        alertname: SREAgentCycleErrorsIncreasing
+        exp_alerts: []

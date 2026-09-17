@@ -55,6 +55,23 @@ sre_agent_cycles_total{result="<RESULT>"}
 
 应用关闭导致的 `context.Canceled` 不记录为 `ERROR`。
 
+## Prometheus 告警规则
+
+`apps/sre-agent-v2/prometheusrule.yaml` 当前定义两个 `warning` 级别告警：
+
+- `SREAgentMetricsTargetDown`：采集目标连续 2 分钟返回 `up == 0`，或从服务发现中消失；
+- `SREAgentCycleErrorsIncreasing`：最近 5 分钟新增至少 3 个失败周期，并持续 2 分钟。
+
+规则由 Prometheus 负责计算，通知是否发送以及发送到哪个管理员渠道，由现有 Alertmanager 路由和 Receiver 配置决定；本清单本身不定义通知接收人。
+
+这两个告警名称不属于 SRE Agent 当前支持的修复告警，不会触发 Pod 重启或其他自动修复动作。
+
+规则测试使用与集群一致的 Prometheus 版本：
+
+```bash
+apps/sre-agent-v2/scripts/test-prometheus-rules.sh
+```
+
 ## 本地验证
 
 ```bash

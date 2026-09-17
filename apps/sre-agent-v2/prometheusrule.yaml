@@ -1,0 +1,53 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sre-agent-v2
+  namespace: sre-agent-system
+  labels:
+    app.kubernetes.io/name: sre-agent-v2
+    app.kubernetes.io/component: monitoring
+    release: prometheus-stack
+spec:
+  groups:
+    - name: sre-agent-v2.rules
+      rules:
+        - alert: SREAgentMetricsTargetDown
+          expr: |
+            (
+              up{
+                namespace="sre-agent-system",
+                service="sre-agent-v2-metrics"
+              } == 0
+            )
+            or
+            absent(
+              up{
+                namespace="sre-agent-system",
+                service="sre-agent-v2-metrics"
+              }
+            )
+          for: 2m
+          labels:
+            component: sre-agent-v2
+            severity: warning
+          annotations:
+            summary: SRE Agent metrics target is unavailable
+            description: Prometheus cannot scrape the SRE Agent metrics target in namespace sre-agent-system.
+        - alert: SREAgentCycleErrorsIncreasing
+          expr: |
+            sum by (namespace, service) (
+              increase(
+                sre_agent_cycles_total{
+                  namespace="sre-agent-system",
+                  service="sre-agent-v2-metrics",
+                  result="ERROR"
+                }[5m]
+              )
+            ) >= 3
+          for: 2m
+          labels:
+            component: sre-agent-v2
+            severity: warning
+          annotations:
+            summary: SRE Agent cycle errors are increasing
+            description: SRE Agent recorded at least three failed cycles during the last five minutes.
