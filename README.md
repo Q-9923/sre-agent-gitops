@@ -77,4 +77,4 @@ curl -fsS http://127.0.0.1:8080/metrics
 
 只有 Agent 正在对应地址运行时，上述 `curl` 才能成功。
 
-进程已经提供 `/metrics`，但集群级持续采集仍需相应的 Kubernetes Service 和 Prometheus Operator ServiceMonitor 配置。
+集群级持续采集已通过 `apps/sre-agent-v2/service.yaml` 和 `apps/sre-agent-v2/servicemonitor.yaml` 接入 Prometheus Operator。ServiceMonitor 由 `release=prometheus-stack` 选择器发现，采集目标 `sre-agent-v2-metrics` 已验证为 `up=1`；可使用 `sre_agent_cycles_total` 查询 Agent 周期处理结果。

@@ -3,32 +3,70 @@
 ## OPT-20260916-001：交付并接入 SRE Agent 运行指标
 
 - 日期：2026-09-16
+- 完成日期：2026-09-17
 - 模块：可观测性 / Prometheus Metrics
 - 优先级：P1
-- 状态：待验收
+- 状态：已完成
 - 现状：
-  - 已在源码中增加统一 operational HTTP handler；
-  - `/livez`、`/readyz` 与 `/metrics` 共用 HTTP 服务；
-  - 已增加 Go Runtime Metrics；
-  - 已增加 `sre_agent_cycles_total{result=...}` 业务计数器；
-  - result 标签限制为固定集合，未知结果归一化为 `UNKNOWN`；
-  - 尚未构建和部署本次 Metrics 版本镜像。
+  - `/livez`、`/readyz` 与 `/metrics` 已通过统一 operational HTTP 服务提供；
+  - 已暴露 Go Runtime Metrics；
+  - 已暴露 `sre_agent_cycles_total{result=...}` 业务计数器；
+  - `result` 标签限制为 `NO_ACTION`、`PROCESSED`、`ERROR` 和 `UNKNOWN`；
+  - 应用关闭导致的 `context.Canceled` 不记录为 `ERROR`；
+  - 集群内 Service 和 Prometheus Operator ServiceMonitor 已通过 GitOps 部署。
 - 证据：
-  - 单元测试、Race 测试、`go vet` 和构建通过；
-  - 本地 Smoke Test 已观察到 `sre_agent_cycles_total{result="ERROR"} 1`；
-  - `/livez` 返回 200，依赖失败时 `/readyz` 返回 503；
-  - SIGTERM 后 operational HTTP 端口正常关闭。
-- 影响：在完成集群交付前，Prometheus 尚不能持续采集生产 Shadow Agent 的运行指标，Grafana 和告警规则也无法使用这些指标。
+  - 单元测试、Race 测试、`go vet`、模块校验和构建均通过；
+  - 本地 Smoke Test 已验证 `/metrics`、探针语义和 SIGTERM 后端口关闭；
+  - 源码提交为 `f82d6c638bbab03cfc29c62b38fe3138a22e85a2`；
+  - 部署镜像为 `v2.0.0-shadow.7-f82d6c638bba`，OCI digest 为 `sha256:072904e52c1c3920e7ca0b722a74e4580dd4471da71d9481f82a5f5003de12a4`；
+  - Service 与 ServiceMonitor 提交为 `dd4ab40402e5a175178f3aec548a0d15e02becf5`；
+  - Argo CD 已调谐至目标 revision，并显示 `Synced/Healthy`；
+  - Service Endpoint 已匹配运行中的 Agent Pod，目标端口为 8080；
+  - Prometheus 查询 `up{namespace="sre-agent-system",service="sre-agent-v2-metrics"}` 返回 1；
+  - Prometheus 已查询到 `NO_ACTION` 和 `PROCESSED` 两类 `sre_agent_cycles_total` 序列。
+- 影响：
+  - Prometheus 现已能够持续采集 Shadow Agent 的运行状态与周期处理结果；
+  - 后续 Grafana 仪表盘和告警规则可以基于稳定、低基数的指标构建。
 - 优化方向：
-  - 构建并推送不可变版本镜像；
-  - 通过 GitOps 更新 Deployment；
-  - 为 Metrics 暴露集群内 Service；
-  - 根据现有 Prometheus Operator 部署方式增加 ServiceMonitor；
-  - 后续补充 cycle 错误率、处理时延和决策结果等低基数指标。
+  - 本条目的基础 Metrics 交付范围已经完成；
+  - 后续可独立增加周期处理时延、错误率告警、长期无处理进展告警和 Grafana 仪表盘；
+  - 新增指标继续禁止使用 Pod UID、incident ID、资源名称或原始错误文本作为标签。
 - 验收标准：
-  - Argo CD 显示目标 revision 为 `Synced/Healthy`；
-  - Pod 使用预期镜像 digest 且无异常重启；
-  - `/livez`、`/readyz`、`/metrics` 行为符合预期；
-  - Prometheus Targets 中采集目标为 Up；
-  - Prometheus 查询可以看到 `sre_agent_cycles_total`；
-  - 指标标签保持低基数，不包含 Pod UID、incident ID 或错误文本。
+  - Argo CD 为 `Synced/Healthy`：已满足；
+  - Pod 使用预期镜像 digest 且无发布异常：已满足；
+  - `/livez`、`/readyz`、`/metrics` 行为符合预期：已满足；
+  - Prometheus Target 为 Up：已满足；
+  - Prometheus 可以查询 `sre_agent_cycles_total`：已满足；
+  - 指标标签保持低基数：已满足。
+
+## OPT-20260917-002：完善节点与容器运行时故障取证
+
+- 日期：2026-09-17
+- 模块：基础设施可观测性 / 节点可靠性
+- 优先级：P2
+- 状态：待实施
+- 现状：
+  - `k8s-node3` 曾出现多个不同工作负载同刻以 `Unknown/255` 终止；
+  - Kubernetes Event 未保留足以确认触发源的证据；
+  - 当前只能将范围收敛到节点或容器运行时级别，不能确认具体根因；
+  - SRE Agent、Argo CD、Ollama 和监控组件均受到了同一事件影响。
+- 证据：
+  - 多个容器的 `lastFinished` 均为 `2026-09-16T11:15:08Z`；
+  - `calico-node` 随后重新报告 `CalicoIsUp`；
+  - 检查时节点已经恢复为 `Ready=True`；
+  - 现有 Node Event 和应用日志无法还原主机、kubelet 或 containerd 的完整时间线。
+- 影响：
+  - 再次发生节点级异常时，可能只能观察到大量 Pod 重启，无法快速区分主机重启、运行时重启、kubelet 故障或人为操作；
+  - 容易将节点级故障误判为单个应用故障，增加错误修复风险和平均恢复时间。
+- 优化方向：
+  - 确认并配置宿主机 systemd journal 的持久化和保留周期；
+  - 集中采集 kubelet、containerd 和系统启动日志；
+  - 对节点启动时间变化、节点 NotReady、容器运行时异常和同节点批量重启建立告警；
+  - 编写节点级重启取证 Runbook，包含宿主机启动时间、`last -x`、kubelet/containerd 日志和跨命名空间 Pod 时间线检查；
+  - 将节点级事件与 SRE Agent 的业务指标和探针状态关联展示。
+- 验收标准：
+  - 节点或 containerd 重启后，相关日志在服务恢复后仍可查询；
+  - 测试环境模拟节点或运行时重启时能够触发告警；
+  - Runbook 能够在同一时间线上关联节点状态、运行时日志和受影响 Pod；
+  - 能够明确区分节点级中断与单个 SRE Agent 进程故障；
+  - 采集内容不包含凭据、Token、kubeconfig 或其他敏感数据。
