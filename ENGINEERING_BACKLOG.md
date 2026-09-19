@@ -70,3 +70,74 @@
   - Runbook 能够在同一时间线上关联节点状态、运行时日志和受影响 Pod；
   - 能够明确区分节点级中断与单个 SRE Agent 进程故障；
   - 采集内容不包含凭据、Token、kubeconfig 或其他敏感数据。
+
+## OPT-20260919-003：交付 SRE Agent 告警规则与 Grafana 仪表盘
+
+- 日期：2026-09-17
+- 完成日期：2026-09-19
+- 模块：可观测性 / Prometheus Alerting / Grafana
+- 优先级：P1
+- 状态：已完成
+- 现状：
+  - 已部署 `SREAgentMetricsTargetDown` 和 `SREAgentCycleErrorsIncreasing` 两条 `warning` 级别规则；
+  - 采集目标返回 0 或从服务发现中消失时，目标离线规则持续 2 分钟后触发；
+  - 最近 5 分钟新增至少 3 个失败周期并持续 2 分钟时，周期错误规则触发；
+  - 已部署 `SRE Agent v2 Operations` Grafana Dashboard；
+  - Dashboard 包含采集目标、5 分钟错误数、累计周期、周期速率和 Go goroutine 五个面板；
+  - 告警规则和 Dashboard 均不增加 Agent 权限，也不会触发自动修复。
+- 证据：
+  - PrometheusRule 提交为 `7e8623b6c9de9bf7a2e1a57fa7885308f16134e7`；
+  - Grafana Dashboard 提交为 `7f70dc5e90374e183acdecab20371ff3f37c1e20`；
+  - Argo CD 已调谐到 Dashboard 提交并显示 `Synced/Healthy`；
+  - Prometheus Operator 已验证 PrometheusRule，`prometheus-operator-validated=true`；
+  - Prometheus `/api/v1/rules` 返回两条规则且 `health=ok`；
+  - promtool 测试覆盖等待期、触发、恢复、低于阈值和目标完全消失；
+  - Dashboard ConfigMap 契约测试和服务端 dry-run 通过；
+  - 五条 Dashboard PromQL 已通过真实 Prometheus API 验证；
+  - Grafana sidecar 已发现 `/tmp/dashboards/sre-agent-v2.json`；
+  - Grafana API 返回目标 Dashboard `provisioned=true`、面板数为 5；
+  - Prometheus datasource health 返回 `OK`。
+- 影响：
+  - 采集链路故障和周期错误增长现在能够由 Prometheus 持续计算；
+  - 运维人员可以通过统一 Dashboard 查看 Agent 的采集状态、周期结果和运行时状态；
+  - 指标查询继续保持低基数，不包含 Pod UID、incident ID 或原始错误文本。
+- 验收标准：
+  - PrometheusRule 通过 promtool 单元测试：已满足；
+  - Prometheus 规则引擎成功加载两条规则：已满足；
+  - Dashboard ConfigMap 被 Grafana sidecar 发现：已满足；
+  - Grafana API 能按 UID 查询 Dashboard：已满足；
+  - 五个面板使用正确 datasource 和 PromQL：已满足；
+  - Dashboard datasource health 为 `OK`：已满足；
+  - 不触发 SRE Agent 自动修复：已满足。
+
+## OPT-20260919-004：配置并验证管理员告警通知渠道
+
+- 日期：2026-09-19
+- 模块：可观测性 / Alertmanager Notifications
+- 优先级：P1
+- 状态：待决策
+- 现状：
+  - Prometheus 已能够计算 SRE Agent 的两条告警规则；
+  - 当前任务没有新增 Alertmanager Receiver；
+  - 尚未验证现有 Alertmanager 路由是否会把这两条告警投递给管理员；
+  - 告警可以在 Prometheus 和 Grafana 中查看，但不能据此确认管理员一定会收到外部通知。
+- 证据：
+  - Prometheus `/api/v1/rules` 已加载两条规则；
+  - `prometheusrule.yaml` 只定义规则，不定义通知接收人；
+  - README 已明确通知由 Alertmanager Route 和 Receiver 决定。
+- 影响：
+  - 若没有匹配的 Alertmanager 路由，告警触发后可能只停留在监控系统中；
+  - 无人值守期间可能延迟发现 Metrics 采集故障或周期错误增长。
+- 优化方向：
+  - 由管理员选择邮件、企业微信、钉钉、Slack 或其他通知渠道；
+  - 使用 Secret 或外部密钥系统保存凭据，不将 Token 写入 Git；
+  - 为 `component="sre-agent-v2"` 或明确的 alertname 配置最小匹配路由；
+  - 验证触发通知、恢复通知、分组、抑制和重复发送间隔；
+  - 通知链路不得扩大 Agent 的 Kubernetes 权限或自动修复范围。
+- 验收标准：
+  - 通知渠道和责任人已明确；
+  - 凭据未进入 Git、日志或 ConfigMap；
+  - 两条告警均能向目标 Receiver 发送测试通知；
+  - 告警恢复后能够发送恢复通知；
+  - Alertmanager 路由不会影响其他现有告警；
+  - 通知失败能够被监控和排查。

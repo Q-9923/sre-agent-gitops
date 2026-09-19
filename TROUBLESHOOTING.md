@@ -65,3 +65,59 @@
   - 再次发生时优先保存宿主机启动时间以及 kubelet、containerd 和系统日志，避免日志轮转后丢失根因证据；
   - 为节点重启、容器运行时异常和同节点大量 `Unknown/255` 终止建立监控；
   - 不应根据单个 Pod 的重启次数直接判断应用代码故障，应先进行同节点、同时间窗口的关联分析。
+
+## ERR-20260919-003：Grafana Dashboard 契约测试因查询字符串空格不一致失败
+
+- 日期：2026-09-19
+- 环境：Linux/amd64，Prometheus promtool 2.51.0
+- 状态：已解决
+- 报错问题：修改 Metrics Target 查询后，`test-grafana-dashboard.sh` 返回退出码 1，但没有进入 promtool 测试。
+- 影响：Dashboard 提交前质量门被阻止；未影响集群中的现有工作负载。
+- 诊断证据：
+  - Dashboard 清单使用 `}) or vector(0)`；
+  - 测试脚本期望字符串错误地使用了 `})  or vector(0)`；
+  - 独立运行 `grafana-dashboard-promql-test.yaml` 返回 `SUCCESS`；
+  - `bash -x` 显示脚本停止在 Dashboard JSON 的 jq 契约断言。
+- 原因：测试期望字符串在 `or` 前多了一个空格，精确字符串比较失败。
+- 解决方案：将测试期望字符串改为与 Dashboard 清单一致的单空格形式。
+- 验证方法：
+  - `apps/sre-agent-v2/scripts/test-grafana-dashboard.sh`
+  - `apps/sre-agent-v2/scripts/test-prometheus-rules.sh`
+  - Kubernetes 服务端 dry-run。
+- 验证结果：Dashboard 契约测试、PromQL 语义测试、规则测试和服务端 dry-run 均通过。
+- 预防措施：
+  - 修改 PromQL 后同时检查清单、契约测试和 PromQL 测试中的表达式；
+  - 无输出失败时使用 `bash -x` 定位脚本停止位置；
+  - 使用独立 `promql_expr_test` 验证表达式语义，不只依赖字符串比较。
+
+## ERR-20260919-004：Argo CD 验证轮询结束后才完成目标 revision 调谐
+
+- 日期：2026-09-17
+- 完成日期：2026-09-19
+- 环境：Kubernetes 开发集群，Argo CD Application `sre-agent-v2-shadow`
+- 状态：已解决
+- 报错问题：连续 36 次轮询后，Application 仍显示旧 revision，验证脚本输出 `STOP: Argo CD did not reach the expected revision`。
+- 影响：Dashboard 部署验收被暂停；没有证据表明 Argo CD 同步失败或现有工作负载不可用。
+- 诊断证据：
+  - 本地、tracking branch 和远端 `main` 均为目标提交；
+  - 后续检查时 Application 已切换到目标 revision；
+  - Application 为 `Synced/Healthy`，`conditions=[]`；
+  - Operation 状态为 `Succeeded`，消息为 `successfully synced (all tasks run)`；
+  - Dashboard ConfigMap 已由 Argo CD 创建。
+- 原因：验证轮询窗口在 Argo CD 完成下一次 Git 刷新和自动调谐前结束；没有发现仓库认证、清单生成或同步错误。
+- 解决方案：先执行只读检查确认远端 revision、Application conditions、operation state 和 Events；未执行 hard refresh，等待后续自动调谐完成。
+- 验证方法：
+  - 对比本地、远端和 Application revision；
+  - 检查 Application sync、health、conditions 和 operation state；
+  - 检查 Dashboard ConfigMap、sidecar 文件和 Grafana API。
+- 验证结果：
+  - Argo CD 已调谐到目标 revision；
+  - Dashboard ConfigMap 已创建；
+  - Grafana sidecar 已发现 Dashboard；
+  - Grafana API 返回 `provisioned=true`；
+  - Prometheus datasource health 为 `OK`。
+- 预防措施：
+  - 轮询超时后先检查远端 revision 和 Argo CD conditions，不直接判定部署失败；
+  - 对正常 Git 轮询使用更长等待窗口或逐步退避；
+  - 只有确认缓存长期不更新且不存在仓库错误时，才考虑受控 hard refresh；
+  - 区分“验证窗口结束”和“同步操作失败”。

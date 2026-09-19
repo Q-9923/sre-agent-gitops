@@ -43,7 +43,6 @@ Agent 在 `HEALTH_ADDRESS` 上提供统一的 operational HTTP 服务，默认�
 sre_agent_cycles_total{result="<RESULT>"}
 
 ```
-
 允许的 `result` 标签值：
 
 - `NO_ACTION`
@@ -68,9 +67,11 @@ sre_agent_cycles_total{result="<RESULT>"}
 
 规则测试使用与集群一致的 Prometheus 版本：
 
+
 ```bash
 apps/sre-agent-v2/scripts/test-prometheus-rules.sh
 ```
+该 PrometheusRule 已通过 GitOps 部署。Prometheus `/api/v1/rules` 已加载两条规则，规则健康状态均为 `ok`；验收时没有满足告警条件，因此状态为 `inactive`。
 ## Grafana Dashboard
 
 `apps/sre-agent-v2/grafana-dashboard.yaml` 以 ConfigMap 形式提供 `SRE Agent v2 Operations` 仪表盘。Grafana dashboard sidecar 通过 `grafana_dashboard: "1"` 标签发现该资源，并使用 UID 为 `prometheus` 的 Prometheus datasource。
@@ -90,8 +91,7 @@ Dashboard ConfigMap 和 JSON 契约可以通过以下命令验证：
 ```bash
 apps/sre-agent-v2/scripts/test-grafana-dashboard.sh
 ```
-
-
+该 Dashboard 已通过 GitOps 部署。Grafana sidecar 已将 `sre-agent-v2.json` 写入 dashboard 目录，Grafana API 返回 `provisioned=true`，5 个面板均已导入；Prometheus datasource health 为 `OK`。
 
 ## 本地验证
 
