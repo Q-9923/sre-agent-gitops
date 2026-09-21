@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: sre-agent-v2
     app.kubernetes.io/component: agent
-    app.kubernetes.io/version: v2.0.0-shadow.7
+    app.kubernetes.io/version: v2.0.0-shadow.8
 spec:
   replicas: 1
 
@@ -23,7 +23,7 @@ spec:
       labels:
         app.kubernetes.io/name: sre-agent-v2
         app.kubernetes.io/component: agent
-        app.kubernetes.io/version: v2.0.0-shadow.7
+        app.kubernetes.io/version: v2.0.0-shadow.8
     spec:
       serviceAccountName: sre-agent-v2
       automountServiceAccountToken: true
@@ -41,7 +41,7 @@ spec:
 
       containers:
         - name: sre-agent
-          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.7-f82d6c638bba@sha256:072904e52c1c3920e7ca0b722a74e4580dd4471da71d9481f82a5f5003de12a4
+          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.8-26d8953791dd@sha256:9f59502003c560c179034971a1d31162bc399ef066a9aecf783a4c5e67184328
           imagePullPolicy: IfNotPresent
 
           ports:
