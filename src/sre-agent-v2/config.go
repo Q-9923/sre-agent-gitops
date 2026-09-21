@@ -11,46 +11,50 @@ import (
 )
 
 type agentConfig struct {
-	ClusterName              string
-	PrometheusURL            string
-	OllamaURL                string
-	OllamaModel              string
-	AllowedNamespaces        []string
-	AllowedControllerKinds   []string
-	RestartPodApproved       bool
-	MinimumConfidence        float64
-	PollInterval             time.Duration
-	ReadinessStaleAfter      time.Duration
-	LivenessStaleAfter       time.Duration
-	RestartCooldown          time.Duration
-	AttemptWindow            time.Duration
-	MaximumAttempts          int
-	PrometheusTimeout        time.Duration
-	OllamaTimeout            time.Duration
-	KubernetesRequestTimeout time.Duration
-	HealthAddress            string
+	ClusterName               string
+	PrometheusURL             string
+	OllamaURL                 string
+	OllamaModel               string
+	AllowedNamespaces         []string
+	AllowedControllerKinds    []string
+	RestartPodApproved        bool
+	MinimumConfidence         float64
+	PollInterval              time.Duration
+	ReadinessStaleAfter       time.Duration
+	LivenessStaleAfter        time.Duration
+	RestartCooldown           time.Duration
+	AttemptWindow             time.Duration
+	MaximumAttempts           int
+	PrometheusTimeout         time.Duration
+	OllamaTimeout             time.Duration
+	KubernetesRequestTimeout  time.Duration
+	RemediationStateNamespace string
+	RemediationStateConfigMap string
+	HealthAddress             string
 }
 
 func loadConfig() (agentConfig, error) {
 	config := agentConfig{
-		ClusterName:              envOrDefault("SRE_CLUSTER_NAME", "dev"),
-		PrometheusURL:            envOrDefault("PROMETHEUS_URL", "http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090"),
-		OllamaURL:                envOrDefault("OLLAMA_URL", "http://ollama-service.ai-services.svc:11434"),
-		OllamaModel:              envOrDefault("OLLAMA_MODEL", "qwen2.5:1.5b"),
-		AllowedNamespaces:        splitCSV(envOrDefault("ALLOWED_NAMESPACES", "default")),
-		AllowedControllerKinds:   splitCSV(envOrDefault("ALLOWED_CONTROLLER_KINDS", "ReplicaSet")),
-		RestartPodApproved:       false,
-		MinimumConfidence:        0.90,
-		PollInterval:             30 * time.Second,
-		ReadinessStaleAfter:      5 * time.Minute,
-		LivenessStaleAfter:       10 * time.Minute,
-		RestartCooldown:          10 * time.Minute,
-		AttemptWindow:            time.Hour,
-		MaximumAttempts:          1,
-		PrometheusTimeout:        10 * time.Second,
-		OllamaTimeout:            90 * time.Second,
-		KubernetesRequestTimeout: 15 * time.Second,
-		HealthAddress:            envOrDefault("HEALTH_ADDRESS", ":8080"),
+		ClusterName:               envOrDefault("SRE_CLUSTER_NAME", "dev"),
+		PrometheusURL:             envOrDefault("PROMETHEUS_URL", "http://prometheus-stack-kube-prom-prometheus.monitoring.svc:9090"),
+		OllamaURL:                 envOrDefault("OLLAMA_URL", "http://ollama-service.ai-services.svc:11434"),
+		OllamaModel:               envOrDefault("OLLAMA_MODEL", "qwen2.5:1.5b"),
+		AllowedNamespaces:         splitCSV(envOrDefault("ALLOWED_NAMESPACES", "default")),
+		AllowedControllerKinds:    splitCSV(envOrDefault("ALLOWED_CONTROLLER_KINDS", "ReplicaSet")),
+		RestartPodApproved:        false,
+		MinimumConfidence:         0.90,
+		PollInterval:              30 * time.Second,
+		ReadinessStaleAfter:       5 * time.Minute,
+		LivenessStaleAfter:        10 * time.Minute,
+		RestartCooldown:           10 * time.Minute,
+		AttemptWindow:             time.Hour,
+		MaximumAttempts:           1,
+		PrometheusTimeout:         10 * time.Second,
+		OllamaTimeout:             90 * time.Second,
+		KubernetesRequestTimeout:  15 * time.Second,
+		RemediationStateNamespace: envOrDefault("REMEDIATION_STATE_NAMESPACE", "sre-agent-system"),
+		RemediationStateConfigMap: envOrDefault("REMEDIATION_STATE_CONFIGMAP", "sre-agent-v2-state"),
+		HealthAddress:             envOrDefault("HEALTH_ADDRESS", ":8080"),
 	}
 
 	var err error
@@ -90,6 +94,16 @@ func (config agentConfig) validate() error {
 	}
 	if strings.TrimSpace(config.OllamaModel) == "" {
 		return fmt.Errorf("OLLAMA_MODEL must not be empty")
+	}
+	if strings.TrimSpace(config.RemediationStateNamespace) == "" {
+		return fmt.Errorf(
+			"REMEDIATION_STATE_NAMESPACE must not be empty",
+		)
+	}
+	if strings.TrimSpace(config.RemediationStateConfigMap) == "" {
+		return fmt.Errorf(
+			"REMEDIATION_STATE_CONFIGMAP must not be empty",
+		)
 	}
 	if _, _, err := net.SplitHostPort(config.HealthAddress); err != nil {
 		return fmt.Errorf(

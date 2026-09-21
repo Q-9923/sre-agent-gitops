@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -46,5 +47,56 @@ func TestRemediationTargetKeyUsesControllerIdentityAcrossReplacementPods(t *test
 
 	if remediationTargetKey(first) != remediationTargetKey(replacement) {
 		t.Fatalf("replacement pods owned by one controller must share a remediation key")
+	}
+}
+
+func TestRemediationMemoryRetainsCooldownBeyondAttemptWindow(
+	t *testing.T,
+) {
+	const (
+		incidentID = "inc-memory-long-cooldown"
+		targetKey  = "dev/sre-agent-lab/ReplicaSet/long-cooldown"
+	)
+
+	ctx := context.Background()
+	recordedAt := time.Date(2026, 9, 21, 11, 0, 0, 0, time.UTC)
+	memory := newRemediationMemory()
+
+	err := memory.Record(
+		ctx,
+		remediationStateRecord{
+			Kind:       remediationStateRecordActionAttempted,
+			IncidentID: incidentID,
+			TargetKey:  targetKey,
+			OccurredAt: recordedAt,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Record() error = %v; want nil", err)
+	}
+
+	snapshot, err := memory.Snapshot(
+		ctx,
+		remediationStateQuery{
+			IncidentID:    "inc-memory-next",
+			TargetKey:     targetKey,
+			Now:           recordedAt.Add(30 * time.Minute),
+			Cooldown:      time.Hour,
+			AttemptWindow: 10 * time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v; want nil", err)
+	}
+	if !snapshot.InCooldown {
+		t.Fatal(
+			"snapshot.InCooldown = false; want true while action remains inside cooldown",
+		)
+	}
+	if snapshot.AttemptsInWindow != 0 {
+		t.Fatalf(
+			"snapshot.AttemptsInWindow = %d; want 0 outside attempt window",
+			snapshot.AttemptsInWindow,
+		)
 	}
 }

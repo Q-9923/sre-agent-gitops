@@ -103,3 +103,62 @@ func TestLoadConfigRejectsLivenessStaleAfterNotGreaterThanPollInterval(t *testin
 		})
 	}
 }
+func TestLoadConfigReadsRemediationStateLocation(t *testing.T) {
+	t.Setenv(
+		"REMEDIATION_STATE_NAMESPACE",
+		"custom-agent-system",
+	)
+	t.Setenv(
+		"REMEDIATION_STATE_CONFIGMAP",
+		"custom-remediation-state",
+	)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v; want nil", err)
+	}
+
+	if config.RemediationStateNamespace != "custom-agent-system" {
+		t.Fatalf(
+			"RemediationStateNamespace = %q; want %q",
+			config.RemediationStateNamespace,
+			"custom-agent-system",
+		)
+	}
+	if config.RemediationStateConfigMap != "custom-remediation-state" {
+		t.Fatalf(
+			"RemediationStateConfigMap = %q; want %q",
+			config.RemediationStateConfigMap,
+			"custom-remediation-state",
+		)
+	}
+}
+func TestLoadConfigRejectsEmptyRemediationStateLocation(t *testing.T) {
+	tests := []struct {
+		name            string
+		environmentName string
+	}{
+		{
+			name:            "namespace",
+			environmentName: "REMEDIATION_STATE_NAMESPACE",
+		},
+		{
+			name:            "ConfigMap name",
+			environmentName: "REMEDIATION_STATE_CONFIGMAP",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.environmentName, " ")
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatalf(
+					"loadConfig() accepted an empty %s; want an error",
+					test.environmentName,
+				)
+			}
+		})
+	}
+}

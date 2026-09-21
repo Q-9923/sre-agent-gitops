@@ -65,6 +65,12 @@ spec:
             - name: HEALTH_ADDRESS
               value: ":8080"
 
+            - name: REMEDIATION_STATE_NAMESPACE
+              value: "sre-agent-system"
+
+            - name: REMEDIATION_STATE_CONFIGMAP
+              value: "sre-agent-v2-state"
+
             - name: ALLOWED_NAMESPACES
               value: "sre-agent-lab"
 

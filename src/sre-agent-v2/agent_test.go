@@ -79,6 +79,218 @@ func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *test
 	}
 }
 
+func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateUnavailable(t *testing.T) {
+	observedAt := time.Date(2026, 9, 19, 20, 0, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-state-unavailable",
+		},
+		Annotations: map[string]string{"description": "CrashLoopBackOff"},
+		State:       "firing",
+		ActiveAt:    observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-state-unavailable",
+			UID:       "pod-uid-state-unavailable",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-state-unavailable",
+		},
+	}
+
+	kubernetesClient := fake.NewSimpleClientset()
+	decider := &stubDecisionSource{}
+	var logOutput bytes.Buffer
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			AllowedNamespaces:        []string{"default"},
+			AllowedControllerKinds:   []string{"ReplicaSet"},
+			RestartPodApproved:       true,
+			MinimumConfidence:        0.90,
+			RestartCooldown:          10 * time.Minute,
+			AttemptWindow:            time.Hour,
+			MaximumAttempts:          1,
+			OllamaTimeout:            time.Second,
+			KubernetesRequestTimeout: time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector:  &stubContextCollector{evidence: podEvidence},
+		ollama:     decider,
+		memory: &failingRemediationStateStore{
+			err: errors.New("state unavailable"),
+		},
+		logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:    func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(context.Background(), alert)
+
+	if decider.received.IncidentID != "" {
+		t.Fatalf(
+			"decision source received incident %q; want no decision call",
+			decider.received.IncidentID,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf("Kubernetes actions = %#v; want none", actions)
+	}
+	if !strings.Contains(
+		logOutput.String(),
+		`"error_code":"REMEDIATION_STATE_UNAVAILABLE"`,
+	) {
+		t.Fatalf(
+			"missing REMEDIATION_STATE_UNAVAILABLE log: %s",
+			logOutput.String(),
+		)
+	}
+}
+
+type failingRemediationStateStore struct {
+	err error
+}
+
+func (store *failingRemediationStateStore) Snapshot(
+	context.Context,
+	remediationStateQuery,
+) (remediationSnapshot, error) {
+	return remediationSnapshot{}, store.err
+}
+
+func (store *failingRemediationStateStore) Record(
+	context.Context,
+	remediationStateRecord,
+) error {
+	return store.err
+}
+
+func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateRecordFails(
+	t *testing.T,
+) {
+	observedAt := time.Date(2026, 9, 19, 20, 30, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-record-failure",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-record-failure",
+			UID:       "pod-uid-record-failure",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-record-failure",
+		},
+	}
+	incidentID := incidentIDFor(alert, podEvidence.Target.UID)
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = incidentID
+	decision.Target = podEvidence.Target
+
+	kubernetesClient := fake.NewSimpleClientset(
+		&v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podEvidence.Target.Name,
+				Namespace: podEvidence.Target.Namespace,
+				UID:       types.UID(podEvidence.Target.UID),
+			},
+		},
+	)
+	decider := &stubDecisionSource{decision: decision}
+	var logOutput bytes.Buffer
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			AllowedNamespaces:        []string{"default"},
+			AllowedControllerKinds:   []string{"ReplicaSet"},
+			RestartPodApproved:       true,
+			MinimumConfidence:        0.90,
+			RestartCooldown:          10 * time.Minute,
+			AttemptWindow:            time.Hour,
+			MaximumAttempts:          1,
+			OllamaTimeout:            time.Second,
+			KubernetesRequestTimeout: time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		ollama: decider,
+		memory: &recordFailingRemediationStateStore{
+			err: errors.New("persist state failed"),
+		},
+		logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:    func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(context.Background(), alert)
+
+	if decider.received.IncidentID != incidentID {
+		t.Fatalf(
+			"decision source received incident %q; want %q",
+			decider.received.IncidentID,
+			incidentID,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none after state record failure",
+			actions,
+		)
+	}
+	if !strings.Contains(
+		logOutput.String(),
+		`"error_code":"REMEDIATION_STATE_RECORD_FAILED"`,
+	) {
+		t.Fatalf(
+			"missing REMEDIATION_STATE_RECORD_FAILED log: %s",
+			logOutput.String(),
+		)
+	}
+}
+
+type recordFailingRemediationStateStore struct {
+	err         error
+	lastRecord  remediationStateRecord
+	sawDeadline bool
+}
+
+func (*recordFailingRemediationStateStore) Snapshot(
+	context.Context,
+	remediationStateQuery,
+) (remediationSnapshot, error) {
+	return remediationSnapshot{}, nil
+}
+
+func (store *recordFailingRemediationStateStore) Record(
+	ctx context.Context,
+	record remediationStateRecord,
+) error {
+	store.lastRecord = record
+	_, store.sawDeadline = ctx.Deadline()
+	return store.err
+}
+
 type stubContextCollector struct {
 	evidence PodEvidence
 	err      error
@@ -781,6 +993,149 @@ func TestNewSREAgentConnectsCycleResultRecorder(t *testing.T) {
 		t.Fatalf(
 			"recorded cycle result = %q; want NO_ACTION",
 			recordedResults[0],
+		)
+	}
+}
+func TestNewSREAgentUsesConfiguredConfigMapRemediationState(t *testing.T) {
+	config := agentConfig{
+		RemediationStateNamespace: "custom-agent-system",
+		RemediationStateConfigMap: "custom-remediation-state",
+	}
+	kubernetesClient := fake.NewSimpleClientset()
+
+	agent := newSREAgent(
+		config,
+		kubernetesClient,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		nil,
+		nil,
+	)
+
+	stateStore, ok := agent.memory.(*configMapRemediationState)
+	if !ok {
+		t.Fatalf(
+			"newSREAgent() memory type = %T; want *configMapRemediationState",
+			agent.memory,
+		)
+	}
+	if stateStore.namespace != config.RemediationStateNamespace {
+		t.Fatalf(
+			"state namespace = %q; want %q",
+			stateStore.namespace,
+			config.RemediationStateNamespace,
+		)
+	}
+	if stateStore.configName != config.RemediationStateConfigMap {
+		t.Fatalf(
+			"state ConfigMap = %q; want %q",
+			stateStore.configName,
+			config.RemediationStateConfigMap,
+		)
+	}
+}
+
+func TestHandlePodCrashLoopingReportsDeniedIncidentStateRecordFailure(
+	t *testing.T,
+) {
+	observedAt := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-denied-record-failure",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-denied-record-failure",
+			UID:       "pod-uid-denied-record-failure",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-denied-record-failure",
+		},
+	}
+	incidentID := incidentIDFor(alert, podEvidence.Target.UID)
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = incidentID
+	decision.Target = podEvidence.Target
+
+	kubernetesClient := fake.NewSimpleClientset()
+	decider := &stubDecisionSource{decision: decision}
+	stateStore := &recordFailingRemediationStateStore{
+		err: errors.New("persist denied incident failed"),
+	}
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			AllowedNamespaces:        []string{"default"},
+			AllowedControllerKinds:   []string{"ReplicaSet"},
+			RestartPodApproved:       false,
+			MinimumConfidence:        0.90,
+			RestartCooldown:          10 * time.Minute,
+			AttemptWindow:            time.Hour,
+			MaximumAttempts:          1,
+			OllamaTimeout:            time.Second,
+			KubernetesRequestTimeout: time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		ollama: decider,
+		memory: stateStore,
+		logger: slog.New(
+			slog.NewJSONHandler(&logOutput, nil),
+		),
+		now: func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(context.Background(), alert)
+
+	if decider.received.IncidentID != incidentID {
+		t.Fatalf(
+			"decision source received incident %q; want %q",
+			decider.received.IncidentID,
+			incidentID,
+		)
+	}
+	if stateStore.lastRecord.Kind != remediationStateRecordIncidentHandled {
+		t.Fatalf(
+			"record kind = %q; want %q",
+			stateStore.lastRecord.Kind,
+			remediationStateRecordIncidentHandled,
+		)
+	}
+	if !stateStore.sawDeadline {
+		t.Fatal(
+			"denied incident state record received no deadline",
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none",
+			actions,
+		)
+	}
+	if !strings.Contains(
+		logOutput.String(),
+		`"error_code":"REMEDIATION_STATE_RECORD_FAILED"`,
+	) {
+		t.Fatalf(
+			"missing REMEDIATION_STATE_RECORD_FAILED log: %s",
+			logOutput.String(),
 		)
 	}
 }

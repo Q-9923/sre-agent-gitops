@@ -32,7 +32,7 @@ type sreAgent struct {
 	collector           podContextSource
 	prometheus          firingAlertSource
 	ollama              decisionSource
-	memory              *remediationMemory
+	memory              remediationStateStore
 	logger              *slog.Logger
 	now                 func() time.Time
 	markCycleProgress   func()
@@ -49,12 +49,16 @@ func newSREAgent(
 	recordCycleResult func(string),
 ) *sreAgent {
 	return &sreAgent{
-		config:              config,
-		kubernetes:          kubernetesClient,
-		collector:           newKubernetesContextCollector(kubernetesClient),
-		prometheus:          newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
-		ollama:              newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
-		memory:              newRemediationMemory(),
+		config:     config,
+		kubernetes: kubernetesClient,
+		collector:  newKubernetesContextCollector(kubernetesClient),
+		prometheus: newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
+		ollama:     newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
+		memory: newConfigMapRemediationState(
+			kubernetesClient,
+			config.RemediationStateNamespace,
+			config.RemediationStateConfigMap,
+		),
 		logger:              logger,
 		now:                 time.Now,
 		markCycleProgress:   markCycleProgress,
@@ -208,13 +212,34 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	incidentID := incidentIDFor(alert, podEvidence.Target.UID)
 	targetKey := remediationTargetKey(podEvidence)
 	now := agent.now()
-	remediationState := agent.memory.snapshot(
-		incidentID,
-		targetKey,
-		now,
-		agent.config.RestartCooldown,
-		agent.config.AttemptWindow,
+
+	stateContext, cancelState := context.WithTimeout(
+		ctx,
+		agent.config.KubernetesRequestTimeout,
 	)
+	remediationState, err := agent.memory.Snapshot(
+		stateContext,
+		remediationStateQuery{
+			IncidentID:    incidentID,
+			TargetKey:     targetKey,
+			Now:           now,
+			Cooldown:      agent.config.RestartCooldown,
+			AttemptWindow: agent.config.AttemptWindow,
+		},
+	)
+	cancelState()
+	if err != nil {
+		agent.logger.Warn(
+			"remediation_state_unavailable",
+			"incident_id", incidentID,
+			"target", targetLabel,
+			"result", "NO_ACTION",
+			"error_code", "REMEDIATION_STATE_UNAVAILABLE",
+			"error", err,
+		)
+		return
+	}
+
 	if remediationState.Duplicate {
 		agent.logger.Info(
 			"incident_skipped",
@@ -265,8 +290,35 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		AttemptsInWindow:       remediationState.AttemptsInWindow,
 		MaximumAttempts:        agent.config.MaximumAttempts,
 	})
+
 	if !policyResult.Allowed {
-		agent.memory.markIncident(incidentID, now)
+		recordContext, cancelRecord := context.WithTimeout(
+			ctx,
+			agent.config.KubernetesRequestTimeout,
+		)
+		err = agent.memory.Record(
+			recordContext,
+			remediationStateRecord{
+				Kind:       remediationStateRecordIncidentHandled,
+				IncidentID: incidentID,
+				OccurredAt: now,
+			},
+		)
+		cancelRecord()
+		if err != nil {
+			agent.logger.Error(
+				"remediation_state_record_failed",
+				"incident_id", incidentID,
+				"action", decision.Action,
+				"target", targetLabel,
+				"result", "ERROR",
+				"error_code", "REMEDIATION_STATE_RECORD_FAILED",
+				"policy_error_code", policyResult.Code,
+				"error", err,
+			)
+			return
+		}
+
 		agent.logger.Info(
 			"decision_denied",
 			"incident_id", incidentID,
@@ -282,7 +334,34 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 
 	// Count the authorized attempt before calling Kubernetes. A timeout or
 	// ambiguous network result must not trigger an immediate second deletion.
-	agent.memory.record(incidentID, targetKey, now)
+
+	recordContext, cancelRecord := context.WithTimeout(
+		ctx,
+		agent.config.KubernetesRequestTimeout,
+	)
+	err = agent.memory.Record(
+		recordContext,
+		remediationStateRecord{
+			Kind:       remediationStateRecordActionAttempted,
+			IncidentID: incidentID,
+			TargetKey:  targetKey,
+			OccurredAt: now,
+		},
+	)
+	cancelRecord()
+	if err != nil {
+		agent.logger.Error(
+			"remediation_state_record_failed",
+			"incident_id", incidentID,
+			"action", decision.Action,
+			"target", targetLabel,
+			"result", "ERROR",
+			"error_code", "REMEDIATION_STATE_RECORD_FAILED",
+			"error", err,
+		)
+		return
+	}
+
 	actionContext, cancelAction := context.WithTimeout(ctx, agent.config.KubernetesRequestTimeout)
 	err = executeApprovedAction(actionContext, agent.kubernetes, decision)
 	cancelAction()
