@@ -390,12 +390,11 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 
 func incidentIDFor(alert Alert, podUID string) string {
 	input := fmt.Sprintf(
-		"%s\x00%s\x00%s\x00%s\x00%s",
+		"%s\x00%s\x00%s\x00%s",
 		alert.Labels["alertname"],
 		alert.Labels["namespace"],
 		alert.Labels["pod"],
 		podUID,
-		alert.ActiveAt.UTC().Format(time.RFC3339Nano),
 	)
 	digest := sha256.Sum256([]byte(input))
 	return fmt.Sprintf("inc-%x", digest[:12])

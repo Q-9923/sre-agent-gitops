@@ -79,6 +79,89 @@ func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *test
 	}
 }
 
+func TestHandlePodCrashLoopingTreatsReactivatedAlertForSamePodAsDuplicate(
+	t *testing.T,
+) {
+	observedAt := time.Date(2026, 9, 21, 14, 0, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-reactivated",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-reactivated",
+			UID:       "pod-uid-reactivated",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-reactivated",
+		},
+	}
+
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = incidentIDFor(alert, podEvidence.Target.UID)
+	decision.Target = podEvidence.Target
+
+	kubernetesClient := fake.NewSimpleClientset()
+	decider := &stubDecisionSource{decision: decision}
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			AllowedNamespaces:        []string{"default"},
+			AllowedControllerKinds:   []string{"ReplicaSet"},
+			RestartPodApproved:       false,
+			MinimumConfidence:        0.90,
+			RestartCooldown:          10 * time.Minute,
+			AttemptWindow:            time.Hour,
+			MaximumAttempts:          1,
+			OllamaTimeout:            time.Second,
+			KubernetesRequestTimeout: time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector:  &stubContextCollector{evidence: podEvidence},
+		ollama:     decider,
+		memory:     newRemediationMemory(),
+		logger:     slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:        func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(context.Background(), alert)
+
+	reactivatedAlert := alert
+	reactivatedAlert.ActiveAt = observedAt.Add(2 * time.Minute)
+	agent.handlePodCrashLooping(context.Background(), reactivatedAlert)
+
+	if decider.calls != 1 {
+		t.Fatalf(
+			"decision source calls = %d; want 1 for the same Pod UID after alert reactivation",
+			decider.calls,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf("Kubernetes actions = %#v; want none in Shadow mode", actions)
+	}
+	if !strings.Contains(
+		logOutput.String(),
+		`"error_code":"DUPLICATE_INCIDENT"`,
+	) {
+		t.Fatalf("missing duplicate incident log: %s", logOutput.String())
+	}
+}
+
 func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateUnavailable(t *testing.T) {
 	observedAt := time.Date(2026, 9, 19, 20, 0, 0, 0, time.UTC)
 	alert := Alert{
@@ -304,9 +387,11 @@ type stubDecisionSource struct {
 	decision Decision
 	err      error
 	received IncidentEvidence
+	calls    int
 }
 
 func (source *stubDecisionSource) decide(_ context.Context, evidence IncidentEvidence) (Decision, error) {
+	source.calls++
 	source.received = evidence
 	return source.decision, source.err
 }
