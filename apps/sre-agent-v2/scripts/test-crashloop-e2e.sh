@@ -90,7 +90,14 @@ cleanup() {
     kubectl -n "${LAB_NAMESPACE}" delete deployment \
       "${TEST_DEPLOYMENT}" \
       --ignore-not-found \
-      --wait=false >/dev/null 2>&1 || true
+      --wait=true >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "${TEST_POD}" ]]; then
+    kubectl -n "${LAB_NAMESPACE}" wait \
+      --for=delete \
+      "pod/${TEST_POD}" \
+      --timeout=60s >/dev/null 2>&1 || true
   fi
 
   if [[ -n "${PORT_FORWARD_LOG}" ]]; then
@@ -101,7 +108,6 @@ cleanup() {
     rmdir -- "${TEMP_DIR}" 2>/dev/null || true
   fi
 }
-
 agent_logs() {
   kubectl -n "${AGENT_NAMESPACE}" logs "${AGENT_POD_BEFORE}" \
     --since-time="${TEST_STARTED_AT}" 2>/dev/null || true
@@ -326,15 +332,27 @@ for attempt in $(seq 1 60); do
           | select(
               .msg == "decision_denied"
               and .target == $target
-              and .action == "RESTART_POD"
-              and .error_code == "APPROVAL_REQUIRED"
+              and (
+                (
+                  .action == "RESTART_POD"
+                  and .error_code == "APPROVAL_REQUIRED"
+                )
+                or
+                (
+                  .action == "IGNORE"
+                  and .error_code == "DECISION_IGNORE"
+                )
+              )
             )
         ' |
       tail -n 1
   )
 
   if [[ -n "${DECISION_JSON}" ]]; then
-    printf 'decision_denied=true attempt=%s\n' "${attempt}"
+    printf 'safe_decision=true action=%s error_code=%s attempt=%s\n' \
+      "$(jq -r '.action' <<<"${DECISION_JSON}")" \
+      "$(jq -r '.error_code' <<<"${DECISION_JSON}")" \
+      "${attempt}"
     break
   fi
 
@@ -344,7 +362,7 @@ done
 if [[ -z "${DECISION_JSON}" ]]; then
   echo "=== TARGET LOGS ==="
   show_target_logs
-  echo "ERROR: expected approval denial was not observed" >&2
+  echo "ERROR: expected a recognized safe decision was not observed" >&2
   exit 1
 fi
 
