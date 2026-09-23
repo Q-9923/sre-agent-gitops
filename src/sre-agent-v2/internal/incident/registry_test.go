@@ -97,6 +97,8 @@ func TestRegistryObserveCreatesNewIncidentAfterPreviousIncidentIsResolved(
 			IncidentID:      first.ID,
 			ExpectedVersion: first.Version,
 			To:              StateResolved,
+			Actor:           "test",
+			ReasonCode:      "ALERT_RESOLVED",
 		},
 	)
 	if err != nil {
@@ -154,6 +156,8 @@ func TestRegistryTransitionRejectsStaleExpectedVersion(t *testing.T) {
 		IncidentID:      current.ID,
 		ExpectedVersion: current.Version,
 		To:              StateResolved,
+		Actor:           "test",
+		ReasonCode:      "ALERT_RESOLVED",
 	}
 
 	updated, err := registry.Transition(ctx, command)
@@ -218,5 +222,134 @@ func TestRegistryObserveRejectsObservationWithoutTargetUID(t *testing.T) {
 	}
 	if valid.ID == "" {
 		t.Fatal("valid Observe() Incident ID is empty")
+	}
+}
+func TestObservationIdempotencyKeyIsStableAndTargetUIDSensitive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	observation := Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app",
+			UID:       "pod-uid-1",
+		},
+	}
+
+	first, err := observation.IdempotencyKey()
+	if err != nil {
+		t.Fatalf("first IdempotencyKey() error = %v", err)
+	}
+
+	second, err := observation.IdempotencyKey()
+	if err != nil {
+		t.Fatalf("second IdempotencyKey() error = %v", err)
+	}
+
+	if first == "" {
+		t.Fatal("IdempotencyKey() returned an empty key")
+	}
+
+	if second != first {
+		t.Fatalf(
+			"second key = %q; want %q",
+			second,
+			first,
+		)
+	}
+
+	changed := observation
+	changed.Target.UID = "pod-uid-2"
+
+	changedKey, err := changed.IdempotencyKey()
+	if err != nil {
+		t.Fatalf("changed IdempotencyKey() error = %v", err)
+	}
+
+	if changedKey == first {
+		t.Fatal("different target UIDs produced the same key")
+	}
+
+	invalid := observation
+	invalid.Target.UID = " "
+
+	if _, err := invalid.IdempotencyKey(); err == nil {
+		t.Fatal("IdempotencyKey() accepted an empty target UID")
+	}
+}
+func TestRegistryTransitionRequiresAuditIdentity(t *testing.T) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+
+	current, created, err := registry.Observe(
+		ctx,
+		Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app",
+				UID:       "pod-uid-audit-required",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	tests := []struct {
+		name       string
+		actor      string
+		reasonCode string
+	}{
+		{
+			name:       "missing actor",
+			actor:      " ",
+			reasonCode: "ALERT_RESOLVED",
+		},
+		{
+			name:       "missing reason code",
+			actor:      "sre-agent",
+			reasonCode: " ",
+		},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+
+		t.Run(testCase.name, func(t *testing.T) {
+			_, transitionErr := registry.Transition(
+				ctx,
+				TransitionCommand{
+					IncidentID:      current.ID,
+					ExpectedVersion: current.Version,
+					To:              StateResolved,
+					Actor:           testCase.actor,
+					ReasonCode:      testCase.reasonCode,
+				},
+			)
+
+			if !errors.Is(
+				transitionErr,
+				ErrInvalidTransition,
+			) {
+				t.Fatalf(
+					"Transition() error = %v; want ErrInvalidTransition",
+					transitionErr,
+				)
+			}
+		})
 	}
 }

@@ -18,6 +18,7 @@ const (
 
 var (
 	ErrInvalidObservation = errors.New("invalid incident observation")
+	ErrInvalidTransition  = errors.New("invalid incident transition")
 	ErrVersionConflict    = errors.New("incident version conflict")
 )
 
@@ -47,6 +48,19 @@ type TransitionCommand struct {
 	IncidentID      string
 	ExpectedVersion uint64
 	To              State
+	Actor           string
+	ReasonCode      string
+}
+
+func (observation Observation) IdempotencyKey() (string, error) {
+	if strings.TrimSpace(observation.Target.UID) == "" {
+		return "", fmt.Errorf(
+			"%w: target UID is required",
+			ErrInvalidObservation,
+		)
+	}
+
+	return idempotencyKeyFor(observation), nil
 }
 
 type Registry struct {
@@ -72,14 +86,10 @@ func (registry *Registry) Observe(
 		return Incident{}, false, err
 	}
 
-	if strings.TrimSpace(observation.Target.UID) == "" {
-		return Incident{}, false, fmt.Errorf(
-			"%w: target UID is required",
-			ErrInvalidObservation,
-		)
+	key, err := observation.IdempotencyKey()
+	if err != nil {
+		return Incident{}, false, err
 	}
-	key := idempotencyKeyFor(observation)
-
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
@@ -109,7 +119,9 @@ func (registry *Registry) Transition(
 	if err := ctx.Err(); err != nil {
 		return Incident{}, err
 	}
-
+	if err := command.Validate(); err != nil {
+		return Incident{}, err
+	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
@@ -133,7 +145,8 @@ func (registry *Registry) Transition(
 
 	if incident.State != StateDetected || command.To != StateResolved {
 		return Incident{}, fmt.Errorf(
-			"invalid incident transition from %q to %q",
+			"%w: from %q to %q",
+			ErrInvalidTransition,
 			incident.State,
 			command.To,
 		)
@@ -147,7 +160,23 @@ func (registry *Registry) Transition(
 
 	return incident, nil
 }
+func (command TransitionCommand) Validate() error {
+	if strings.TrimSpace(command.Actor) == "" {
+		return fmt.Errorf(
+			"%w: actor is required",
+			ErrInvalidTransition,
+		)
+	}
 
+	if strings.TrimSpace(command.ReasonCode) == "" {
+		return fmt.Errorf(
+			"%w: reason code is required",
+			ErrInvalidTransition,
+		)
+	}
+
+	return nil
+}
 func idempotencyKeyFor(observation Observation) string {
 	input := fmt.Sprintf(
 		"%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",
