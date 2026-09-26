@@ -162,3 +162,108 @@ func TestLoadConfigRejectsEmptyRemediationStateLocation(t *testing.T) {
 		})
 	}
 }
+func TestLoadConfigDefaultsIncidentStoreBackendToMemory(t *testing.T) {
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v; want nil", err)
+	}
+
+	const expected = "memory"
+	if config.IncidentStoreBackend != expected {
+		t.Fatalf(
+			"IncidentStoreBackend = %q; want %q",
+			config.IncidentStoreBackend,
+			expected,
+		)
+	}
+}
+func TestLoadConfigReadsIncidentStoreBackend(t *testing.T) {
+	t.Setenv("INCIDENT_STORE_BACKEND", "postgres")
+	t.Setenv(
+		"INCIDENT_STORE_POSTGRES_DSN",
+		"postgres://db.example.invalid/sre_agent",
+	)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v; want nil", err)
+	}
+
+	const expected = "postgres"
+	if config.IncidentStoreBackend != expected {
+		t.Fatalf(
+			"IncidentStoreBackend = %q; want %q",
+			config.IncidentStoreBackend,
+			expected,
+		)
+	}
+}
+func TestLoadConfigRejectsUnsupportedIncidentStoreBackend(t *testing.T) {
+	t.Setenv("INCIDENT_STORE_BACKEND", "sqlite")
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal(
+			"loadConfig() accepted unsupported INCIDENT_STORE_BACKEND; want an error",
+		)
+	}
+}
+
+func TestLoadConfigRejectsPostgresBackendWithoutDSN(t *testing.T) {
+	t.Setenv("INCIDENT_STORE_BACKEND", "postgres")
+	t.Setenv("INCIDENT_STORE_POSTGRES_DSN", "")
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal(
+			"loadConfig() accepted postgres backend without " +
+				"INCIDENT_STORE_POSTGRES_DSN; want an error",
+		)
+	}
+}
+func TestLoadConfigReadsIncidentStoreConnectTimeout(t *testing.T) {
+	t.Setenv(
+		"INCIDENT_STORE_CONNECT_TIMEOUT",
+		"3s",
+	)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf(
+			"loadConfig() error = %v; want nil",
+			err,
+		)
+	}
+
+	const expected = 3 * time.Second
+	if config.IncidentStoreConnectTimeout != expected {
+		t.Fatalf(
+			"IncidentStoreConnectTimeout = %s; want %s",
+			config.IncidentStoreConnectTimeout,
+			expected,
+		)
+	}
+}
+func TestLoadConfigReadsIncidentStoreMigrationTimeout(t *testing.T) {
+	t.Setenv(
+		"INCIDENT_STORE_MIGRATION_TIMEOUT",
+		"45s",
+	)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatalf(
+			"loadConfig() error = %v; want nil",
+			err,
+		)
+	}
+
+	const expected = 45 * time.Second
+	if config.IncidentStoreMigrationTimeout != expected {
+		t.Fatalf(
+			"IncidentStoreMigrationTimeout = %s; want %s",
+			config.IncidentStoreMigrationTimeout,
+			expected,
+		)
+	}
+}

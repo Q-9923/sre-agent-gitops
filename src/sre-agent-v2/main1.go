@@ -50,7 +50,6 @@ func main() {
 		)
 		os.Exit(1)
 	}
-
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -58,6 +57,19 @@ func main() {
 	)
 	defer stop()
 
+	incidentHandle, err := openIncidentRegistry(
+		ctx,
+		config,
+	)
+	if err != nil {
+		logger.Error(
+			"incident_store_initialization_failed",
+			"result", "FATAL",
+			"error_code", "INCIDENT_STORE_INITIALIZATION_FAILED",
+			"error", err,
+		)
+		os.Exit(1)
+	}
 	logger.Info(
 		"agent_started",
 		"result", "RUNNING",
@@ -84,23 +96,26 @@ func main() {
 	agent := newSREAgent(
 		config,
 		kubernetesClient,
+		incidentHandle.Registry,
 		logger,
 		liveness.markProgress,
 		readiness.markSuccessfulCycle,
 		metrics.recordCycle,
 	)
-
-	if err := runApplication(
+	applicationErr := runApplication(
 		ctx,
 		healthListener,
 		agent.run,
 		operationalHandler,
-	); err != nil {
+	)
+	incidentHandle.Close()
+
+	if applicationErr != nil {
 		logger.Error(
 			"application_failed",
 			"result", "FATAL",
 			"error_code", "APPLICATION_FAILED",
-			"error", err,
+			"error", applicationErr,
 		)
 		os.Exit(1)
 	}

@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	"sre-agent/internal/incident"
 )
 
 func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *testing.T) {
@@ -63,6 +64,7 @@ func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *test
 		kubernetes: kubernetesClient,
 		collector:  collector,
 		ollama:     decider,
+		incidents:  incident.NewMemoryRegistry(),
 		memory:     newRemediationMemory(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:        func() time.Time { return observedAt },
@@ -134,6 +136,7 @@ func TestHandlePodCrashLoopingTreatsReactivatedAlertForSamePodAsDuplicate(
 		kubernetes: kubernetesClient,
 		collector:  &stubContextCollector{evidence: podEvidence},
 		ollama:     decider,
+		incidents:  incident.NewMemoryRegistry(),
 		memory:     newRemediationMemory(),
 		logger:     slog.New(slog.NewJSONHandler(&logOutput, nil)),
 		now:        func() time.Time { return observedAt },
@@ -208,6 +211,7 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateUnavailable(t *testi
 		kubernetes: kubernetesClient,
 		collector:  &stubContextCollector{evidence: podEvidence},
 		ollama:     decider,
+		incidents:  incident.NewMemoryRegistry(),
 		memory: &failingRemediationStateStore{
 			err: errors.New("state unavailable"),
 		},
@@ -315,6 +319,7 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateRecordFails(
 			KubernetesRequestTimeout: time.Second,
 		},
 		kubernetes: kubernetesClient,
+		incidents:  incident.NewMemoryRegistry(),
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
@@ -417,6 +422,7 @@ func TestRunCycleMarksReadinessAfterSuccessfulPrometheusQuery(t *testing.T) {
 
 	agent := &sreAgent{
 		prometheus: &stubFiringAlertSource{},
+		incidents:  incident.NewMemoryRegistry(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now: func() time.Time {
 			return observedAt
@@ -472,6 +478,7 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
+		incident.NewMemoryRegistry(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func() {},
 		readiness.markSuccessfulCycle,
@@ -526,7 +533,8 @@ func TestRunCycleMarksLivenessProgressWhenPrometheusQueryFails(t *testing.T) {
 		prometheus: &stubFiringAlertSource{
 			err: errors.New("prometheus unavailable"),
 		},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		incidents: incident.NewMemoryRegistry(),
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now: func() time.Time {
 			return currentTime
 		},
@@ -581,6 +589,7 @@ func TestNewSREAgentConnectsCycleProgressToLiveness(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
+		incident.NewMemoryRegistry(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		liveness.markProgress,
 		func() {},
@@ -661,6 +670,7 @@ func TestRunCycleRefreshesLivenessBetweenActionableAlerts(t *testing.T) {
 			KubernetesRequestTimeout: time.Second,
 		},
 		collector: collector,
+		incidents: incident.NewMemoryRegistry(),
 		prometheus: &stubFiringAlertSource{
 			alerts: []Alert{
 				{
@@ -728,6 +738,7 @@ func TestSREAgentRunDoesNotStartCycleWhenContextAlreadyCanceled(
 			PollInterval: time.Hour,
 		},
 		prometheus: alertSource,
+		incidents:  incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -754,6 +765,7 @@ func TestRunCycleDoesNotQueryPrometheusWhenContextCanceled(
 
 	agent := &sreAgent{
 		prometheus: alertSource,
+		incidents:  incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -794,6 +806,7 @@ func TestRunCycleDoesNotLogFailureOrRecordErrorWhenPrometheusCallIsCanceledByShu
 		prometheus: &cancelingAlertSourceForShutdown{
 			cancel: cancel,
 		},
+		incidents: incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -841,6 +854,7 @@ func TestRunCycleLogsPrometheusFailureWhenApplicationContextIsActive(
 
 	agent := &sreAgent{
 		prometheus: &failingAlertSourceForLogging{},
+		incidents:  incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -891,6 +905,7 @@ func TestSREAgentRunContinuesProcessingUntilContextCanceled(
 			PollInterval: time.Millisecond,
 		},
 		prometheus: alertSource,
+		incidents:  incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -942,6 +957,7 @@ func TestRunCycleRecordsNoActionResult(t *testing.T) {
 
 	agent := &sreAgent{
 		prometheus: &stubFiringAlertSource{},
+		incidents:  incident.NewMemoryRegistry(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1047,6 +1063,7 @@ func TestNewSREAgentConnectsCycleResultRecorder(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
+		incident.NewMemoryRegistry(),
 		slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1091,6 +1108,7 @@ func TestNewSREAgentUsesConfiguredConfigMapRemediationState(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		kubernetesClient,
+		incident.NewMemoryRegistry(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
 		nil,
@@ -1176,6 +1194,7 @@ func TestHandlePodCrashLoopingReportsDeniedIncidentStateRecordFailure(
 			KubernetesRequestTimeout: time.Second,
 		},
 		kubernetes: kubernetesClient,
+		incidents:  incident.NewMemoryRegistry(),
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
@@ -1223,4 +1242,342 @@ func TestHandlePodCrashLoopingReportsDeniedIncidentStateRecordFailure(
 			logOutput.String(),
 		)
 	}
+}
+func TestHandlePodCrashLoopingObservesLifecycleIncidentBeforeRemediationState(
+	t *testing.T,
+) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		26,
+		16,
+		30,
+		0,
+		0,
+		time.UTC,
+	)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-lifecycle",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-lifecycle",
+			UID:       "pod-uid-lifecycle",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-lifecycle",
+		},
+	}
+
+	lifecycleRegistry := incident.NewMemoryRegistry()
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			KubernetesRequestTimeout: time.Second,
+		},
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		incidents: lifecycleRegistry,
+		memory: &failingRemediationStateStore{
+			err: errors.New("remediation state unavailable"),
+		},
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return observedAt
+		},
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	observed, created, err := lifecycleRegistry.Observe(
+		context.Background(),
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: podCrashLoopingAlert,
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "default",
+				Name:      "crash-app-lifecycle",
+				UID:       "pod-uid-lifecycle",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"lifecycle Registry.Observe() error = %v; want nil",
+			err,
+		)
+	}
+	if created {
+		t.Fatal(
+			"lifecycle Registry.Observe() created = true; " +
+				"want false because the Agent should have observed it",
+		)
+	}
+	if observed.State != incident.StateDetected {
+		t.Fatalf(
+			"lifecycle incident state = %q; want %q",
+			observed.State,
+			incident.StateDetected,
+		)
+	}
+}
+func TestNewSREAgentConnectsProvidedIncidentRegistry(t *testing.T) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		26,
+		17,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-constructor",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-constructor",
+			UID:       "pod-uid-constructor",
+		},
+	}
+
+	lifecycleRegistry := incident.NewMemoryRegistry()
+	agent := newSREAgent(
+		agentConfig{
+			ClusterName:              "dev",
+			PrometheusURL:            "http://prometheus.test",
+			OllamaURL:                "http://ollama.test",
+			OllamaModel:              "test-model",
+			PrometheusTimeout:        time.Second,
+			OllamaTimeout:            time.Second,
+			KubernetesRequestTimeout: time.Second,
+		},
+		fake.NewSimpleClientset(),
+		lifecycleRegistry,
+		slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		nil,
+		nil,
+		nil,
+	)
+
+	agent.collector = &stubContextCollector{
+		evidence: podEvidence,
+	}
+	agent.memory = &failingRemediationStateStore{
+		err: errors.New("remediation state unavailable"),
+	}
+	agent.now = func() time.Time {
+		return observedAt
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	_, created, err := lifecycleRegistry.Observe(
+		context.Background(),
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: podCrashLoopingAlert,
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "default",
+				Name:      "crash-app-constructor",
+				UID:       "pod-uid-constructor",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"lifecycle Registry.Observe() error = %v; want nil",
+			err,
+		)
+	}
+	if created {
+		t.Fatal(
+			"lifecycle Registry.Observe() created = true; " +
+				"want false because newSREAgent should connect " +
+				"the provided Registry",
+		)
+	}
+}
+func TestHandlePodCrashLoopingDoesNotActWhenIncidentStoreUnavailable(
+	t *testing.T,
+) {
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-registry-unavailable",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State: "firing",
+	}
+
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-registry-unavailable",
+			UID:       "pod-uid-registry-unavailable",
+		},
+	}
+	expectedIncidentID := incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
+	kubernetesClient := fake.NewSimpleClientset()
+	decider := &stubDecisionSource{}
+	stateStore := &trackingRemediationStateStore{}
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:              "dev",
+			KubernetesRequestTimeout: time.Second,
+		},
+		kubernetes: kubernetesClient,
+		incidents: &failingIncidentRegistry{
+			err: errors.New("incident registry unavailable"),
+		},
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		ollama: decider,
+		memory: stateStore,
+		logger: slog.New(
+			slog.NewJSONHandler(&logOutput, nil),
+		),
+		now: func() time.Time {
+			return time.Date(
+				2026,
+				time.September,
+				26,
+				17,
+				30,
+				0,
+				0,
+				time.UTC,
+			)
+		},
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	if stateStore.snapshotCalls != 0 {
+		t.Fatalf(
+			"remediation state Snapshot calls = %d; want 0",
+			stateStore.snapshotCalls,
+		)
+	}
+	if decider.calls != 0 {
+		t.Fatalf(
+			"decision source calls = %d; want 0",
+			decider.calls,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none",
+			actions,
+		)
+	}
+	for _, expected := range []string{
+		`"msg":"incident_store_unavailable"`,
+		`"incident_id":"` + expectedIncidentID + `"`,
+		`"action":"OBSERVE_INCIDENT"`,
+		`"result":"NO_ACTION"`,
+		`"duration_ms":`,
+		`"error_code":"INCIDENT_STORE_UNAVAILABLE"`,
+	} {
+		if !strings.Contains(logOutput.String(), expected) {
+			t.Fatalf(
+				"incident store failure log %q does not contain %q",
+				logOutput.String(),
+				expected,
+			)
+		}
+	}
+}
+
+type failingIncidentRegistry struct {
+	err error
+}
+
+func (registry *failingIncidentRegistry) Observe(
+	context.Context,
+	incident.Observation,
+) (incident.Incident, bool, error) {
+	return incident.Incident{}, false, registry.err
+}
+
+func (registry *failingIncidentRegistry) Transition(
+	context.Context,
+	incident.TransitionCommand,
+) (incident.Incident, error) {
+	return incident.Incident{}, registry.err
+}
+
+type trackingRemediationStateStore struct {
+	snapshotCalls int
+}
+
+func (store *trackingRemediationStateStore) Snapshot(
+	context.Context,
+	remediationStateQuery,
+) (remediationSnapshot, error) {
+	store.snapshotCalls++
+	return remediationSnapshot{}, nil
+}
+
+func (*trackingRemediationStateStore) Record(
+	context.Context,
+	remediationStateRecord,
+) error {
+	return nil
 }

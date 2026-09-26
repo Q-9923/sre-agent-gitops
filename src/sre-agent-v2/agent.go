@@ -10,6 +10,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
+	"sre-agent/internal/incident"
 )
 
 const podCrashLoopingAlert = "PodCrashLooping"
@@ -32,6 +33,7 @@ type sreAgent struct {
 	collector           podContextSource
 	prometheus          firingAlertSource
 	ollama              decisionSource
+	incidents           incidentRegistry
 	memory              remediationStateStore
 	logger              *slog.Logger
 	now                 func() time.Time
@@ -43,6 +45,7 @@ type sreAgent struct {
 func newSREAgent(
 	config agentConfig,
 	kubernetesClient kubernetes.Interface,
+	incidents incidentRegistry,
 	logger *slog.Logger,
 	markCycleProgress func(),
 	markSuccessfulCycle func(),
@@ -51,6 +54,7 @@ func newSREAgent(
 	return &sreAgent{
 		config:     config,
 		kubernetes: kubernetesClient,
+		incidents:  incidents,
 		collector:  newKubernetesContextCollector(kubernetesClient),
 		prometheus: newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
 		ollama:     newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
@@ -208,8 +212,47 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		)
 		return
 	}
+	incidentID := incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
 
-	incidentID := incidentIDFor(alert, podEvidence.Target.UID)
+	incidentStoreStartedAt := agent.now()
+	_, _, err = agent.incidents.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   agent.config.ClusterName,
+			AlertName: alert.Labels["alertname"],
+			Target: incident.Target{
+				Kind:      podEvidence.Target.Kind,
+				Namespace: podEvidence.Target.Namespace,
+				Name:      podEvidence.Target.Name,
+				UID:       podEvidence.Target.UID,
+			},
+		},
+	)
+	incidentStoreDuration := agent.now().Sub(
+		incidentStoreStartedAt,
+	)
+
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
+		agent.logger.Warn(
+			"incident_store_unavailable",
+			"incident_id", incidentID,
+			"action", "OBSERVE_INCIDENT",
+			"target", targetLabel,
+			"result", "NO_ACTION",
+			"duration_ms", incidentStoreDuration.Milliseconds(),
+			"error_code", "INCIDENT_STORE_UNAVAILABLE",
+			"error", err,
+		)
+		return
+	}
 	targetKey := remediationTargetKey(podEvidence)
 	now := agent.now()
 
