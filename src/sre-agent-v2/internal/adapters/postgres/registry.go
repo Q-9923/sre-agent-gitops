@@ -158,22 +158,48 @@ func (registry *Registry) Transition(
 	}()
 
 	const updateQuery = `
-UPDATE incidents
+WITH current AS MATERIALIZED (
+    SELECT
+        id,
+        state
+    FROM incidents
+    WHERE id = $2
+      AND version = $3
+    FOR UPDATE
+)
+UPDATE incidents AS updated
 SET
     state = $1,
-    version = version + 1,
-    resolved_at = statement_timestamp()
-WHERE id = $2
-  AND version = $3
-  AND state = 'DETECTED'
-  AND $1 = 'RESOLVED'
-RETURNING id, state, version
+    version = updated.version + 1,
+    resolved_at = CASE
+        WHEN $1 = 'RESOLVED'
+            THEN statement_timestamp()
+        ELSE NULL
+    END
+FROM current
+WHERE updated.id = current.id
+  AND (
+      (
+          current.state = 'DETECTED'
+          AND $1 IN ('DIAGNOSED', 'RESOLVED')
+      )
+      OR
+      (
+          current.state = 'DIAGNOSED'
+          AND $1 = 'RESOLVED'
+      )
+  )
+RETURNING
+    updated.id,
+    updated.state,
+    updated.version,
+    current.state
 `
-
 	var (
-		result  incident.Incident
-		state   string
-		version int64
+		result    incident.Incident
+		state     string
+		fromState string
+		version   int64
 	)
 
 	err = transaction.QueryRow(
@@ -186,6 +212,7 @@ RETURNING id, state, version
 		&result.ID,
 		&state,
 		&version,
+		&fromState,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return incident.Incident{}, explainTransitionFailure(
@@ -218,7 +245,7 @@ VALUES ($1, $2, $3, $4, $5, $6)
 		auditQuery,
 		result.ID,
 		version,
-		string(incident.StateDetected),
+		fromState,
 		state,
 		command.Actor,
 		command.ReasonCode,

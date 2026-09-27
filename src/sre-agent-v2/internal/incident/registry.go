@@ -12,8 +12,9 @@ import (
 type State string
 
 const (
-	StateDetected State = "DETECTED"
-	StateResolved State = "RESOLVED"
+	StateDetected  State = "DETECTED"
+	StateDiagnosed State = "DIAGNOSED"
+	StateResolved  State = "RESOLVED"
 )
 
 var (
@@ -142,8 +143,12 @@ func (registry *Registry) Transition(
 			command.ExpectedVersion,
 		)
 	}
-
-	if incident.State != StateDetected || command.To != StateResolved {
+	validTransition := (incident.State == StateDetected &&
+		(command.To == StateDiagnosed ||
+			command.To == StateResolved)) ||
+		(incident.State == StateDiagnosed &&
+			command.To == StateResolved)
+	if !validTransition {
 		return Incident{}, fmt.Errorf(
 			"%w: from %q to %q",
 			ErrInvalidTransition,
@@ -151,12 +156,16 @@ func (registry *Registry) Transition(
 			command.To,
 		)
 	}
-
-	incident.State = StateResolved
+	incident.State = command.To
 	incident.Version++
 
 	registry.incidentsByID[incident.ID] = incident
-	delete(registry.activeByKey, incident.idempotencyKey)
+	if incident.State == StateResolved {
+		delete(
+			registry.activeByKey,
+			incident.idempotencyKey,
+		)
+	}
 
 	return incident, nil
 }

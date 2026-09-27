@@ -666,3 +666,326 @@ GROUP BY incidents.id
 		)
 	}
 }
+func TestRegistryTransitionToDiagnosedKeepsIncidentActive(
+	t *testing.T,
+) {
+	ctx, _, registry := newPostgresTestRegistry(t)
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-diagnosed",
+			UID:       "pod-uid-diagnosed",
+		},
+	}
+
+	detected, created, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+	if detected.State != incident.StateDetected {
+		t.Fatalf(
+			"detected State = %q; want %q",
+			detected.State,
+			incident.StateDetected,
+		)
+	}
+	if detected.Version != 1 {
+		t.Fatalf(
+			"detected Version = %d; want 1",
+			detected.Version,
+		)
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: 1,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Transition() error = %v; want nil", err)
+	}
+	if diagnosed.ID != detected.ID {
+		t.Fatalf(
+			"diagnosed Incident ID = %q; want %q",
+			diagnosed.ID,
+			detected.ID,
+		)
+	}
+	if diagnosed.State != incident.StateDiagnosed {
+		t.Fatalf(
+			"diagnosed State = %q; want %q",
+			diagnosed.State,
+			incident.StateDiagnosed,
+		)
+	}
+	if diagnosed.Version != 2 {
+		t.Fatalf(
+			"diagnosed Version = %d; want 2",
+			diagnosed.Version,
+		)
+	}
+
+	observedAgain, createdAgain, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("second Observe() error = %v; want nil", err)
+	}
+	if createdAgain {
+		t.Fatal(
+			"second Observe() created = true; " +
+				"want false while the incident remains active",
+		)
+	}
+	if observedAgain.ID != detected.ID {
+		t.Fatalf(
+			"second Observe() Incident ID = %q; want %q",
+			observedAgain.ID,
+			detected.ID,
+		)
+	}
+	if observedAgain.State != incident.StateDiagnosed {
+		t.Fatalf(
+			"second Observe() State = %q; want %q",
+			observedAgain.State,
+			incident.StateDiagnosed,
+		)
+	}
+	if observedAgain.Version != 2 {
+		t.Fatalf(
+			"second Observe() Version = %d; want 2",
+			observedAgain.Version,
+		)
+	}
+}
+func TestRegistryTransitionFromDiagnosedToResolvedReleasesIncident(
+	t *testing.T,
+) {
+	ctx, pool, registry := newPostgresTestRegistry(t)
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-recovered",
+			UID:       "pod-uid-recovered",
+		},
+	}
+
+	detected, created, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: 1,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"transition to DIAGNOSED error = %v; want nil",
+			err,
+		)
+	}
+	if diagnosed.State != incident.StateDiagnosed {
+		t.Fatalf(
+			"diagnosed State = %q; want %q",
+			diagnosed.State,
+			incident.StateDiagnosed,
+		)
+	}
+	if diagnosed.Version != 2 {
+		t.Fatalf(
+			"diagnosed Version = %d; want 2",
+			diagnosed.Version,
+		)
+	}
+
+	resolved, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: 2,
+			To:              incident.StateResolved,
+			Actor:           "sre-agent",
+			ReasonCode:      "RECOVERY_VERIFIED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"transition to RESOLVED error = %v; want nil",
+			err,
+		)
+	}
+	if resolved.ID != detected.ID {
+		t.Fatalf(
+			"resolved Incident ID = %q; want %q",
+			resolved.ID,
+			detected.ID,
+		)
+	}
+	if resolved.State != incident.StateResolved {
+		t.Fatalf(
+			"resolved State = %q; want %q",
+			resolved.State,
+			incident.StateResolved,
+		)
+	}
+	if resolved.Version != 3 {
+		t.Fatalf(
+			"resolved Version = %d; want 3",
+			resolved.Version,
+		)
+	}
+	var (
+		persistedState   string
+		persistedVersion int64
+		resolvedAt       time.Time
+		auditFromState   string
+		auditToState     string
+		auditActor       string
+		auditReasonCode  string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`
+SELECT
+    incidents.state,
+    incidents.version,
+    incidents.resolved_at,
+    transitions.from_state,
+    transitions.to_state,
+    transitions.actor,
+    transitions.reason_code
+FROM incidents
+JOIN incident_transitions AS transitions
+  ON transitions.incident_id = incidents.id
+ AND transitions.version = incidents.version
+WHERE incidents.id = $1
+`,
+		resolved.ID,
+	).Scan(
+		&persistedState,
+		&persistedVersion,
+		&resolvedAt,
+		&auditFromState,
+		&auditToState,
+		&auditActor,
+		&auditReasonCode,
+	)
+	if err != nil {
+		t.Fatalf(
+			"query resolved incident and audit error = %v; want nil",
+			err,
+		)
+	}
+	if persistedState != string(incident.StateResolved) {
+		t.Fatalf(
+			"persisted State = %q; want %q",
+			persistedState,
+			incident.StateResolved,
+		)
+	}
+	if persistedVersion != 3 {
+		t.Fatalf(
+			"persisted Version = %d; want 3",
+			persistedVersion,
+		)
+	}
+	if resolvedAt.IsZero() {
+		t.Fatal(
+			"persisted resolved_at is zero; want resolution timestamp",
+		)
+	}
+	if auditFromState != string(incident.StateDiagnosed) {
+		t.Fatalf(
+			"audit from_state = %q; want %q",
+			auditFromState,
+			incident.StateDiagnosed,
+		)
+	}
+	if auditToState != string(incident.StateResolved) {
+		t.Fatalf(
+			"audit to_state = %q; want %q",
+			auditToState,
+			incident.StateResolved,
+		)
+	}
+	if auditActor != "sre-agent" {
+		t.Fatalf(
+			"audit actor = %q; want %q",
+			auditActor,
+			"sre-agent",
+		)
+	}
+	if auditReasonCode != "RECOVERY_VERIFIED" {
+		t.Fatalf(
+			"audit reason_code = %q; want %q",
+			auditReasonCode,
+			"RECOVERY_VERIFIED",
+		)
+	}
+	recurrent, recurrentCreated, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("recurrent Observe() error = %v; want nil", err)
+	}
+	if !recurrentCreated {
+		t.Fatal(
+			"recurrent Observe() created = false; " +
+				"want true after the previous incident was resolved",
+		)
+	}
+	if recurrent.ID == resolved.ID {
+		t.Fatalf(
+			"recurrent Incident ID = %q; want a new ID",
+			recurrent.ID,
+		)
+	}
+	if recurrent.State != incident.StateDetected {
+		t.Fatalf(
+			"recurrent State = %q; want %q",
+			recurrent.State,
+			incident.StateDetected,
+		)
+	}
+	if recurrent.Version != 1 {
+		t.Fatalf(
+			"recurrent Version = %d; want 1",
+			recurrent.Version,
+		)
+	}
+}
