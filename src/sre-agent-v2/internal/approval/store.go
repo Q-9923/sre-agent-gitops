@@ -18,6 +18,16 @@ type ApprovalKey struct {
 	TargetUID  string
 }
 
+func (key ApprovalKey) Validate() error {
+	if invalidIdentity(key.IncidentID) ||
+		invalidIdentity(key.PlanHash) ||
+		invalidIdentity(key.TargetUID) {
+		return ErrInvalidApprovalKey
+	}
+
+	return nil
+}
+
 type Store interface {
 	Grant(context.Context, Approval) error
 	Lookup(context.Context, ApprovalKey) (Approval, error)
@@ -44,7 +54,7 @@ func (store *MemoryStore) Grant(
 		return err
 	}
 
-	if err := validateApprovalRecord(granted); err != nil {
+	if err := ValidateRecord(granted); err != nil {
 		return err
 	}
 
@@ -83,10 +93,8 @@ func (store *MemoryStore) Lookup(
 		return Approval{}, err
 	}
 
-	if invalidIdentity(key.IncidentID) ||
-		invalidIdentity(key.PlanHash) ||
-		invalidIdentity(key.TargetUID) {
-		return Approval{}, ErrInvalidApprovalKey
+	if err := key.Validate(); err != nil {
+		return Approval{}, err
 	}
 
 	store.mu.RLock()

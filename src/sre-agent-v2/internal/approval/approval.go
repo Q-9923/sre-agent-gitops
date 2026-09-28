@@ -97,7 +97,7 @@ func Validate(granted Approval, plan Plan, now time.Time) error {
 		return ErrInvalidPlan
 	}
 
-	if err := validateApprovalRecord(granted); err != nil {
+	if err := ValidateRecord(granted); err != nil {
 		return err
 	}
 	if granted.IncidentID != plan.IncidentID {
@@ -123,7 +123,7 @@ func Validate(granted Approval, plan Plan, now time.Time) error {
 	return nil
 }
 
-func validateApprovalRecord(granted Approval) error {
+func ValidateRecord(granted Approval) error {
 	if invalidIdentity(granted.IncidentID) ||
 		invalidIdentity(granted.PlanHash) ||
 		invalidIdentity(granted.TargetUID) ||
