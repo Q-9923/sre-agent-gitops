@@ -983,3 +983,115 @@ func TestRegistryClaimRejectsInvalidCommand(t *testing.T) {
 		})
 	}
 }
+func TestRegistryClaimHistoryRecordsSuccessfulClaimsInVersionOrder(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+
+	observed, created, err := registry.Observe(
+		ctx,
+		Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-claim-history",
+				UID:       "pod-uid-claim-history",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	acquiredAt := time.Date(
+		2026,
+		9,
+		28,
+		17,
+		30,
+		0,
+		0,
+		time.UTC,
+	)
+
+	firstClaim, err := registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: observed.Version,
+			HolderID:        "agent-a",
+			Now:             acquiredAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v; want nil", err)
+	}
+
+	_, err = registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: firstClaim.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             firstClaim.ExpiresAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("expired Lease takeover error = %v; want nil", err)
+	}
+
+	var auditReader ClaimAuditReader = registry
+
+	history, err := auditReader.ClaimHistory(ctx, observed.ID)
+	if err != nil {
+		t.Fatalf("ClaimHistory() error = %v; want nil", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf(
+			"ClaimHistory() length = %d; want 2",
+			len(history),
+		)
+	}
+
+	expected := []ClaimAuditEvent{
+		{
+			IncidentID:      observed.ID,
+			IncidentVersion: 2,
+			HolderID:        "agent-a",
+			AcquiredAt:      acquiredAt,
+			ExpiresAt:       acquiredAt.Add(30 * time.Second),
+		},
+		{
+			IncidentID:      observed.ID,
+			IncidentVersion: 3,
+			HolderID:        "agent-b",
+			AcquiredAt:      acquiredAt.Add(30 * time.Second),
+			ExpiresAt:       acquiredAt.Add(60 * time.Second),
+		},
+	}
+
+	for index := range expected {
+		actualEvent := history[index]
+		expectedEvent := expected[index]
+
+		if actualEvent != expectedEvent {
+			t.Fatalf(
+				"ClaimHistory()[%d] = %#v; want %#v",
+				index,
+				actualEvent,
+				expectedEvent,
+			)
+		}
+	}
+}

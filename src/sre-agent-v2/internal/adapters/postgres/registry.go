@@ -139,26 +139,56 @@ func (registry *Registry) Claim(
 	expiresAt := command.Now.Add(command.LeaseDuration)
 
 	const query = `
-UPDATE incidents
-SET
-    version = version + 1,
-    claim_holder = $1,
-    claim_expires_at = $2
-WHERE id = $3
-  AND version = $4
-  AND (
-      claim_holder IS NULL
-      OR claim_holder = $1
-      OR claim_expires_at <= $5
-  )
-RETURNING
-    id,
-    state,
-    version,
-    claim_holder,
-    claim_expires_at
+WITH claimed AS (
+    UPDATE incidents
+    SET
+        version = version + 1,
+        claim_holder = $1,
+        claim_expires_at = $2
+    WHERE id = $3
+      AND version = $4
+      AND (
+          claim_holder IS NULL
+          OR claim_holder = $1
+          OR claim_expires_at <= $5
+      )
+    RETURNING
+        id,
+        state,
+        version,
+        claim_holder,
+        claim_expires_at
+),
+audited AS (
+    INSERT INTO incident_claims (
+        incident_id,
+        incident_version,
+        holder_id,
+        acquired_at,
+        expires_at
+    )
+    SELECT
+        id,
+        version,
+        claim_holder,
+        $5,
+        claim_expires_at
+    FROM claimed
+    RETURNING
+        incident_id,
+        incident_version
+)
+SELECT
+    claimed.id,
+    claimed.state,
+    claimed.version,
+    claimed.claim_holder,
+    claimed.claim_expires_at
+FROM claimed
+JOIN audited
+  ON audited.incident_id = claimed.id
+ AND audited.incident_version = claimed.version
 `
-
 	var (
 		result             incident.Incident
 		state              string
@@ -210,6 +240,81 @@ RETURNING
 		HolderID:  persistedHolder,
 		ExpiresAt: persistedExpiresAt,
 	}, nil
+}
+
+func (registry *Registry) ClaimHistory(
+	ctx context.Context,
+	incidentID string,
+) ([]incident.ClaimAuditEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	const query = `
+SELECT
+    incident_id,
+    incident_version,
+    holder_id,
+    acquired_at,
+    expires_at
+FROM incident_claims
+WHERE incident_id = $1
+ORDER BY incident_version
+`
+
+	rows, err := registry.pool.Query(
+		ctx,
+		query,
+		incidentID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query incident Claim history: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	history := make([]incident.ClaimAuditEvent, 0)
+
+	for rows.Next() {
+		var (
+			event   incident.ClaimAuditEvent
+			version int64
+		)
+
+		if err := rows.Scan(
+			&event.IncidentID,
+			&version,
+			&event.HolderID,
+			&event.AcquiredAt,
+			&event.ExpiresAt,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"scan incident Claim history: %w",
+				err,
+			)
+		}
+
+		if version <= 0 {
+			return nil, fmt.Errorf(
+				"incident Claim history returned invalid version %d",
+				version,
+			)
+		}
+
+		event.IncidentVersion = uint64(version)
+		history = append(history, event)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"iterate incident Claim history: %w",
+			err,
+		)
+	}
+
+	return history, nil
 }
 
 func (registry *Registry) explainClaimFailure(

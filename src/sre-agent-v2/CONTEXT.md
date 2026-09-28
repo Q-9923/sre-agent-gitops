@@ -37,6 +37,10 @@ _Avoid_: Approver, Actor
 每次 Claim 成功后递增的单调代次；持有旧代次的 Lease Holder 不得继续推进 Incident。
 _Avoid_: Credential, Secret
 
+**Claim Audit Event**:
+每次成功 Claim 产生的不可变审计记录，包含 Incident 版本、Lease Holder、取得时间和到期时间，并按 Incident 版本排序。
+_Avoid_: Active Claim, Approval
+
 **Plan**:
 针对特定 Incident 和目标资源生成的候选修复方案。
 

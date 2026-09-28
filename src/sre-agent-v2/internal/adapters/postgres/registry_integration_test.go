@@ -1224,3 +1224,106 @@ func TestRegistryClaimLeaseSurvivesAdapterRestartAndExpires(
 		)
 	}
 }
+func TestRegistryClaimHistorySurvivesAdapterRestart(t *testing.T) {
+	ctx, pool, firstRegistry := newPostgresTestRegistry(t)
+
+	observed, created, err := firstRegistry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-claim-audit",
+				UID:       "pod-uid-claim-audit",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	acquiredAt := time.Date(
+		2026,
+		9,
+		28,
+		17,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	_, err = firstRegistry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: observed.Version,
+			HolderID:        "agent-a",
+			Now:             acquiredAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Claim() error = %v; want nil", err)
+	}
+
+	restartedRegistry := NewRegistry(pool)
+
+	var auditReader incident.ClaimAuditReader = restartedRegistry
+
+	history, err := auditReader.ClaimHistory(ctx, observed.ID)
+	if err != nil {
+		t.Fatalf("ClaimHistory() error = %v; want nil", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf(
+			"ClaimHistory() length = %d; want 1",
+			len(history),
+		)
+	}
+
+	event := history[0]
+
+	if event.IncidentID != observed.ID {
+		t.Fatalf(
+			"event IncidentID = %q; want %q",
+			event.IncidentID,
+			observed.ID,
+		)
+	}
+	if event.IncidentVersion != 2 {
+		t.Fatalf(
+			"event IncidentVersion = %d; want 2",
+			event.IncidentVersion,
+		)
+	}
+	if event.HolderID != "agent-a" {
+		t.Fatalf(
+			"event HolderID = %q; want %q",
+			event.HolderID,
+			"agent-a",
+		)
+	}
+	if !event.AcquiredAt.Equal(acquiredAt) {
+		t.Fatalf(
+			"event AcquiredAt = %s; want %s",
+			event.AcquiredAt,
+			acquiredAt,
+		)
+	}
+
+	expectedExpiry := acquiredAt.Add(30 * time.Second)
+	if !event.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf(
+			"event ExpiresAt = %s; want %s",
+			event.ExpiresAt,
+			expectedExpiry,
+		)
+	}
+}

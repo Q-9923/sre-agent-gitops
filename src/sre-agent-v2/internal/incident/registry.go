@@ -108,6 +108,20 @@ type Claim struct {
 	HolderID  string
 	ExpiresAt time.Time
 }
+type ClaimAuditEvent struct {
+	IncidentID      string
+	IncidentVersion uint64
+	HolderID        string
+	AcquiredAt      time.Time
+	ExpiresAt       time.Time
+}
+
+type ClaimAuditReader interface {
+	ClaimHistory(
+		ctx context.Context,
+		incidentID string,
+	) ([]ClaimAuditEvent, error)
+}
 
 func (observation Observation) IdempotencyKey() (string, error) {
 	if strings.TrimSpace(observation.Target.UID) == "" {
@@ -123,10 +137,11 @@ func (observation Observation) IdempotencyKey() (string, error) {
 type Registry struct {
 	mu sync.Mutex
 
-	activeByKey        map[string]string
-	incidentsByID      map[string]Incident
-	claimsByIncidentID map[string]Claim
-	nextSequence       uint64
+	activeByKey              map[string]string
+	incidentsByID            map[string]Incident
+	claimsByIncidentID       map[string]Claim
+	claimHistoryByIncidentID map[string][]ClaimAuditEvent
+	nextSequence             uint64
 }
 
 func NewMemoryRegistry() *Registry {
@@ -134,6 +149,9 @@ func NewMemoryRegistry() *Registry {
 		activeByKey:        make(map[string]string),
 		incidentsByID:      make(map[string]Incident),
 		claimsByIncidentID: make(map[string]Claim),
+		claimHistoryByIncidentID: make(
+			map[string][]ClaimAuditEvent,
+		),
 	}
 }
 
@@ -226,7 +244,37 @@ func (registry *Registry) Claim(
 	registry.incidentsByID[incident.ID] = incident
 	registry.claimsByIncidentID[incident.ID] = claim
 
+	registry.claimHistoryByIncidentID[incident.ID] = append(
+		registry.claimHistoryByIncidentID[incident.ID],
+		ClaimAuditEvent{
+			IncidentID:      incident.ID,
+			IncidentVersion: incident.Version,
+			HolderID:        claim.HolderID,
+			AcquiredAt:      command.Now,
+			ExpiresAt:       claim.ExpiresAt,
+		},
+	)
+
 	return claim, nil
+}
+
+func (registry *Registry) ClaimHistory(
+	ctx context.Context,
+	incidentID string,
+) ([]ClaimAuditEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	history := registry.claimHistoryByIncidentID[incidentID]
+
+	result := make([]ClaimAuditEvent, len(history))
+	copy(result, history)
+
+	return result, nil
 }
 
 func (registry *Registry) Transition(
