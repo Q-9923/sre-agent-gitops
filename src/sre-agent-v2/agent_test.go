@@ -1545,8 +1545,359 @@ func TestHandlePodCrashLoopingDoesNotActWhenIncidentStoreUnavailable(
 	}
 }
 
+func TestHandlePodCrashLoopingUsesClaimVersionToFenceDiagnosisTransition(
+	t *testing.T,
+) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		28,
+		17,
+		30,
+		0,
+		0,
+		time.UTC,
+	)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-diagnosis-fence",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-diagnosis-fence",
+			UID:       "pod-uid-diagnosis-fence",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-diagnosis-fence",
+		},
+	}
+
+	const holderID = "sre-agent-v2-pod-a"
+	leaseDuration := 30 * time.Second
+
+	observedIncident := incident.Incident{
+		ID:      "inc-agent-diagnosis-fence",
+		State:   incident.StateDetected,
+		Version: 1,
+	}
+	claimedIncident := incident.Incident{
+		ID:      observedIncident.ID,
+		State:   incident.StateDetected,
+		Version: 2,
+	}
+	registry := &claimRejectingIncidentRegistry{
+		observed: observedIncident,
+		claim: incident.Claim{
+			Incident:  claimedIncident,
+			HolderID:  holderID,
+			ExpiresAt: observedAt.Add(leaseDuration),
+		},
+		transitionErr: incident.ErrVersionConflict,
+	}
+
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
+	decision.Target = podEvidence.Target
+
+	decider := &stubDecisionSource{
+		decision: decision,
+	}
+	stateStore := &trackingRemediationStateStore{}
+	kubernetesClient := fake.NewSimpleClientset()
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:                "dev",
+			AllowedNamespaces:          []string{"default"},
+			AllowedControllerKinds:     []string{"ReplicaSet"},
+			RestartPodApproved:         true,
+			MinimumConfidence:          0.90,
+			RestartCooldown:            10 * time.Minute,
+			AttemptWindow:              time.Hour,
+			MaximumAttempts:            1,
+			OllamaTimeout:              time.Second,
+			KubernetesRequestTimeout:   time.Second,
+			IncidentClaimHolderID:      holderID,
+			IncidentClaimLeaseDuration: leaseDuration,
+		},
+		kubernetes: kubernetesClient,
+		incidents:  registry,
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		ollama: decider,
+		memory: stateStore,
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return observedAt
+		},
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	if decider.calls != 1 {
+		t.Fatalf(
+			"decision source calls = %d; want 1",
+			decider.calls,
+		)
+	}
+	if registry.transitionCalls != 1 {
+		t.Fatalf(
+			"incident Transition calls = %d; want 1",
+			registry.transitionCalls,
+		)
+	}
+
+	command := registry.transitionCommand
+	if command.IncidentID != claimedIncident.ID {
+		t.Fatalf(
+			"Transition IncidentID = %q; want %q",
+			command.IncidentID,
+			claimedIncident.ID,
+		)
+	}
+	if command.ExpectedVersion != claimedIncident.Version {
+		t.Fatalf(
+			"Transition ExpectedVersion = %d; want %d",
+			command.ExpectedVersion,
+			claimedIncident.Version,
+		)
+	}
+	if command.To != incident.StateDiagnosed {
+		t.Fatalf(
+			"Transition To = %q; want %q",
+			command.To,
+			incident.StateDiagnosed,
+		)
+	}
+	if command.Actor != holderID {
+		t.Fatalf(
+			"Transition Actor = %q; want %q",
+			command.Actor,
+			holderID,
+		)
+	}
+	if command.ReasonCode != "DIAGNOSIS_COMPLETED" {
+		t.Fatalf(
+			"Transition ReasonCode = %q; want %q",
+			command.ReasonCode,
+			"DIAGNOSIS_COMPLETED",
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none after fencing conflict",
+			actions,
+		)
+	}
+}
+
+func TestHandlePodCrashLoopingDoesNotContinueWhenIncidentClaimIsHeld(
+	t *testing.T,
+) {
+	observedAt := time.Date(
+		2026,
+		time.September,
+		28,
+		17,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-claim-held",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-claim-held",
+			UID:       "pod-uid-claim-held",
+		},
+	}
+
+	const holderID = "sre-agent-v2-pod-a"
+	leaseDuration := 30 * time.Second
+
+	registry := &claimRejectingIncidentRegistry{
+		observed: incident.Incident{
+			ID:      "inc-agent-claim-held",
+			State:   incident.StateDetected,
+			Version: 1,
+		},
+		err: incident.ErrLeaseHeld,
+	}
+	stateStore := &trackingRemediationStateStore{}
+	decider := &stubDecisionSource{}
+	kubernetesClient := fake.NewSimpleClientset()
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:                "dev",
+			IncidentClaimHolderID:      holderID,
+			IncidentClaimLeaseDuration: leaseDuration,
+			KubernetesRequestTimeout:   time.Second,
+		},
+		kubernetes: kubernetesClient,
+		incidents:  registry,
+		collector: &stubContextCollector{
+			evidence: podEvidence,
+		},
+		ollama: decider,
+		memory: stateStore,
+		logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		now: func() time.Time {
+			return observedAt
+		},
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	if registry.claimCalls != 1 {
+		t.Fatalf(
+			"incident Claim calls = %d; want 1",
+			registry.claimCalls,
+		)
+	}
+	if registry.claimCommand.IncidentID != registry.observed.ID {
+		t.Fatalf(
+			"Claim IncidentID = %q; want %q",
+			registry.claimCommand.IncidentID,
+			registry.observed.ID,
+		)
+	}
+	if registry.claimCommand.ExpectedVersion != registry.observed.Version {
+		t.Fatalf(
+			"Claim ExpectedVersion = %d; want %d",
+			registry.claimCommand.ExpectedVersion,
+			registry.observed.Version,
+		)
+	}
+	if registry.claimCommand.HolderID != holderID {
+		t.Fatalf(
+			"Claim HolderID = %q; want %q",
+			registry.claimCommand.HolderID,
+			holderID,
+		)
+	}
+	if !registry.claimCommand.Now.Equal(observedAt) {
+		t.Fatalf(
+			"Claim Now = %s; want %s",
+			registry.claimCommand.Now,
+			observedAt,
+		)
+	}
+	if registry.claimCommand.LeaseDuration != leaseDuration {
+		t.Fatalf(
+			"Claim LeaseDuration = %s; want %s",
+			registry.claimCommand.LeaseDuration,
+			leaseDuration,
+		)
+	}
+	if stateStore.snapshotCalls != 0 {
+		t.Fatalf(
+			"remediation state Snapshot calls = %d; want 0",
+			stateStore.snapshotCalls,
+		)
+	}
+	if decider.calls != 0 {
+		t.Fatalf(
+			"decision source calls = %d; want 0",
+			decider.calls,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none",
+			actions,
+		)
+	}
+}
+
+type claimRejectingIncidentRegistry struct {
+	observed          incident.Incident
+	claim             incident.Claim
+	err               error
+	transitionErr     error
+	claimCalls        int
+	claimCommand      incident.ClaimCommand
+	transitionCalls   int
+	transitionCommand incident.TransitionCommand
+}
+
+func (registry *claimRejectingIncidentRegistry) Observe(
+	context.Context,
+	incident.Observation,
+) (incident.Incident, bool, error) {
+	return registry.observed, true, nil
+}
+
+func (registry *claimRejectingIncidentRegistry) Claim(
+	_ context.Context,
+	command incident.ClaimCommand,
+) (incident.Claim, error) {
+	registry.claimCalls++
+	registry.claimCommand = command
+
+	return registry.claim, registry.err
+}
+
+func (registry *claimRejectingIncidentRegistry) Transition(
+	_ context.Context,
+	command incident.TransitionCommand,
+) (incident.Incident, error) {
+	registry.transitionCalls++
+	registry.transitionCommand = command
+
+	return incident.Incident{}, registry.transitionErr
+}
+
 type failingIncidentRegistry struct {
 	err error
+}
+
+func (registry *failingIncidentRegistry) Claim(
+	context.Context,
+	incident.ClaimCommand,
+) (incident.Claim, error) {
+	return incident.Claim{}, registry.err
 }
 
 func (registry *failingIncidentRegistry) Observe(

@@ -12,6 +12,10 @@ import (
 )
 
 type incidentRegistry interface {
+	Claim(
+		context.Context,
+		incident.ClaimCommand,
+	) (incident.Claim, error)
 	Observe(
 		context.Context,
 		incident.Observation,

@@ -218,7 +218,7 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	)
 
 	incidentStoreStartedAt := agent.now()
-	_, _, err = agent.incidents.Observe(
+	observedIncident, _, err := agent.incidents.Observe(
 		ctx,
 		incident.Observation{
 			Source:    "prometheus",
@@ -252,6 +252,47 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			"error", err,
 		)
 		return
+	}
+
+	claimEnabled :=
+		agent.config.IncidentClaimHolderID != "" &&
+			agent.config.IncidentClaimLeaseDuration > 0
+
+	var claimedIncident incident.Incident
+
+	if claimEnabled {
+		claimStartedAt := agent.now()
+		claim, claimErr := agent.incidents.Claim(
+			ctx,
+			incident.ClaimCommand{
+				IncidentID:      observedIncident.ID,
+				ExpectedVersion: observedIncident.Version,
+				HolderID:        agent.config.IncidentClaimHolderID,
+				Now:             agent.now(),
+				LeaseDuration:   agent.config.IncidentClaimLeaseDuration,
+			},
+		)
+		claimDuration := agent.now().Sub(claimStartedAt)
+
+		if claimErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+
+			agent.logger.Warn(
+				"incident_claim_failed",
+				"incident_id", observedIncident.ID,
+				"action", "CLAIM_INCIDENT",
+				"target", targetLabel,
+				"result", "NO_ACTION",
+				"duration_ms", claimDuration.Milliseconds(),
+				"error_code", "INCIDENT_CLAIM_FAILED",
+				"error", claimErr,
+			)
+			return
+		}
+
+		claimedIncident = claim.Incident
 	}
 	targetKey := remediationTargetKey(podEvidence)
 	now := agent.now()
@@ -318,6 +359,41 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			"error", err,
 		)
 		return
+	}
+
+	if claimEnabled {
+		transitionStartedAt := agent.now()
+		_, transitionErr := agent.incidents.Transition(
+			ctx,
+			incident.TransitionCommand{
+				IncidentID:      claimedIncident.ID,
+				ExpectedVersion: claimedIncident.Version,
+				To:              incident.StateDiagnosed,
+				Actor:           agent.config.IncidentClaimHolderID,
+				ReasonCode:      "DIAGNOSIS_COMPLETED",
+			},
+		)
+		transitionDuration := agent.now().Sub(
+			transitionStartedAt,
+		)
+
+		if transitionErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+
+			agent.logger.Warn(
+				"incident_transition_failed",
+				"incident_id", claimedIncident.ID,
+				"action", "DIAGNOSE_INCIDENT",
+				"target", targetLabel,
+				"result", "NO_ACTION",
+				"duration_ms", transitionDuration.Milliseconds(),
+				"error_code", "INCIDENT_TRANSITION_FAILED",
+				"error", transitionErr,
+			)
+			return
+		}
 	}
 
 	policyResult := EvaluateDecision(decision, PolicyContext{

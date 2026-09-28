@@ -32,6 +32,8 @@ type agentConfig struct {
 	IncidentStoreMigrationTimeout time.Duration
 	IncidentStoreBackend          string
 	IncidentStorePostgresDSN      string
+	IncidentClaimHolderID         string
+	IncidentClaimLeaseDuration    time.Duration
 	RemediationStateNamespace     string
 	RemediationStateConfigMap     string
 	HealthAddress                 string
@@ -60,9 +62,14 @@ func loadConfig() (agentConfig, error) {
 		IncidentStoreMigrationTimeout: 30 * time.Second,
 		IncidentStoreBackend:          envOrDefault("INCIDENT_STORE_BACKEND", "memory"),
 		IncidentStorePostgresDSN:      envOrDefault("INCIDENT_STORE_POSTGRES_DSN", ""),
-		RemediationStateNamespace:     envOrDefault("REMEDIATION_STATE_NAMESPACE", "sre-agent-system"),
-		RemediationStateConfigMap:     envOrDefault("REMEDIATION_STATE_CONFIGMAP", "sre-agent-v2-state"),
-		HealthAddress:                 envOrDefault("HEALTH_ADDRESS", ":8080"),
+		IncidentClaimHolderID: envOrDefault(
+			"INCIDENT_CLAIM_HOLDER_ID",
+			"",
+		),
+		IncidentClaimLeaseDuration: 30 * time.Second,
+		RemediationStateNamespace:  envOrDefault("REMEDIATION_STATE_NAMESPACE", "sre-agent-system"),
+		RemediationStateConfigMap:  envOrDefault("REMEDIATION_STATE_CONFIGMAP", "sre-agent-v2-state"),
+		HealthAddress:              envOrDefault("HEALTH_ADDRESS", ":8080"),
 	}
 
 	var err error
@@ -86,6 +93,7 @@ func loadConfig() (agentConfig, error) {
 		"KUBERNETES_REQUEST_TIMEOUT":       &config.KubernetesRequestTimeout,
 		"INCIDENT_STORE_CONNECT_TIMEOUT":   &config.IncidentStoreConnectTimeout,
 		"INCIDENT_STORE_MIGRATION_TIMEOUT": &config.IncidentStoreMigrationTimeout,
+		"INCIDENT_CLAIM_LEASE_DURATION":    &config.IncidentClaimLeaseDuration,
 	} {
 		if *destination, err = envDuration(name, *destination); err != nil {
 			return agentConfig{}, err
@@ -175,6 +183,16 @@ func (config agentConfig) validate() error {
 	if config.LivenessStaleAfter <= config.PollInterval {
 		return fmt.Errorf(
 			"LIVENESS_STALE_AFTER must be greater than POLL_INTERVAL",
+		)
+	}
+	if config.IncidentClaimLeaseDuration <= 0 {
+		return fmt.Errorf(
+			"INCIDENT_CLAIM_LEASE_DURATION must be greater than zero",
+		)
+	}
+	if strings.TrimSpace(config.IncidentClaimHolderID) == "" {
+		return fmt.Errorf(
+			"INCIDENT_CLAIM_HOLDER_ID must not be empty",
 		)
 	}
 	return nil

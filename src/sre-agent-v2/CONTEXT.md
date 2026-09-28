@@ -52,3 +52,14 @@ _Avoid_: Active Claim, Approval
 
 **Verification**:
 独立判断修复后目标是否恢复的结果。
+
+## Current Agent Orchestration Boundary
+
+- Agent 在取得 Pod UID 后先执行 `Observe`，再使用 Incident 当前版本申请 `Claim`。
+- `INCIDENT_CLAIM_HOLDER_ID` 必须显式配置且不能为空。
+- `INCIDENT_CLAIM_LEASE_DURATION` 默认值为 `30s`，并且必须大于零。
+- Claim 被其他实例持有、版本冲突或存储访问失败时，Agent 失败关闭，不读取修复状态、不调用模型，也不执行 Kubernetes 动作。
+- 模型诊断成功后，Agent 使用 Claim 返回的 Incident 版本作为 fencing token，执行 `DETECTED -> DIAGNOSED` 状态迁移。
+- 诊断迁移发生版本冲突或存储错误时，Agent 在策略判断和 Kubernetes 动作之前停止。
+- 当前 fencing 只覆盖到诊断状态迁移；动作审批和实际执行前仍需增加第二次 fencing 检查。
+- 当前源码尚未部署 PostgreSQL Incident Store，也没有改变 Shadow 环境的 `RESTART_POD_APPROVED=false` 安全边界。
