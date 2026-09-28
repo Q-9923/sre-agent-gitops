@@ -1327,3 +1327,115 @@ func TestRegistryClaimHistorySurvivesAdapterRestart(t *testing.T) {
 		)
 	}
 }
+func TestRegistryTransitionRejectsStaleClaimVersionAfterLeaseTakeover(
+	t *testing.T,
+) {
+	ctx, _, registry := newPostgresTestRegistry(t)
+
+	observed, created, err := registry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-postgres-fencing",
+				UID:       "pod-uid-postgres-fencing",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(
+		2026,
+		9,
+		28,
+		18,
+		30,
+		0,
+		0,
+		time.UTC,
+	)
+
+	staleClaim, err := registry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: observed.Version,
+			HolderID:        "agent-a",
+			Now:             now,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("agent-a Claim() error = %v; want nil", err)
+	}
+
+	currentClaim, err := registry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: staleClaim.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             staleClaim.ExpiresAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("agent-b takeover Claim() error = %v; want nil", err)
+	}
+
+	_, err = registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: staleClaim.Incident.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "agent-a",
+			ReasonCode:      "STALE_LEASE_HOLDER",
+		},
+	)
+	if !errors.Is(err, incident.ErrVersionConflict) {
+		t.Fatalf(
+			"stale holder Transition() error = %v; want ErrVersionConflict",
+			err,
+		)
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: currentClaim.Incident.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "agent-b",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"current holder Transition() error = %v; want nil",
+			err,
+		)
+	}
+	if diagnosed.State != incident.StateDiagnosed {
+		t.Fatalf(
+			"diagnosed State = %q; want %q",
+			diagnosed.State,
+			incident.StateDiagnosed,
+		)
+	}
+	if diagnosed.Version != 4 {
+		t.Fatalf(
+			"diagnosed Version = %d; want 4",
+			diagnosed.Version,
+		)
+	}
+}
