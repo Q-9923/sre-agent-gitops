@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 type State string
@@ -21,6 +22,8 @@ var (
 	ErrInvalidObservation = errors.New("invalid incident observation")
 	ErrInvalidTransition  = errors.New("invalid incident transition")
 	ErrVersionConflict    = errors.New("incident version conflict")
+	ErrLeaseHeld          = errors.New("incident lease is held")
+	ErrInvalidClaim       = errors.New("invalid incident claim")
 )
 
 type Target struct {
@@ -53,6 +56,59 @@ type TransitionCommand struct {
 	ReasonCode      string
 }
 
+type ClaimCommand struct {
+	IncidentID      string
+	ExpectedVersion uint64
+	HolderID        string
+	Now             time.Time
+	LeaseDuration   time.Duration
+}
+
+func (command ClaimCommand) Validate() error {
+	if strings.TrimSpace(command.IncidentID) == "" {
+		return fmt.Errorf(
+			"%w: incident ID is required",
+			ErrInvalidClaim,
+		)
+	}
+
+	if command.ExpectedVersion == 0 {
+		return fmt.Errorf(
+			"%w: expected version must be greater than zero",
+			ErrInvalidClaim,
+		)
+	}
+
+	if strings.TrimSpace(command.HolderID) == "" {
+		return fmt.Errorf(
+			"%w: holder ID is required",
+			ErrInvalidClaim,
+		)
+	}
+
+	if command.Now.IsZero() {
+		return fmt.Errorf(
+			"%w: current time is required",
+			ErrInvalidClaim,
+		)
+	}
+
+	if command.LeaseDuration <= 0 {
+		return fmt.Errorf(
+			"%w: lease duration must be greater than zero",
+			ErrInvalidClaim,
+		)
+	}
+
+	return nil
+}
+
+type Claim struct {
+	Incident  Incident
+	HolderID  string
+	ExpiresAt time.Time
+}
+
 func (observation Observation) IdempotencyKey() (string, error) {
 	if strings.TrimSpace(observation.Target.UID) == "" {
 		return "", fmt.Errorf(
@@ -67,15 +123,17 @@ func (observation Observation) IdempotencyKey() (string, error) {
 type Registry struct {
 	mu sync.Mutex
 
-	activeByKey   map[string]string
-	incidentsByID map[string]Incident
-	nextSequence  uint64
+	activeByKey        map[string]string
+	incidentsByID      map[string]Incident
+	claimsByIncidentID map[string]Claim
+	nextSequence       uint64
 }
 
 func NewMemoryRegistry() *Registry {
 	return &Registry{
-		activeByKey:   make(map[string]string),
-		incidentsByID: make(map[string]Incident),
+		activeByKey:        make(map[string]string),
+		incidentsByID:      make(map[string]Incident),
+		claimsByIncidentID: make(map[string]Claim),
 	}
 }
 
@@ -111,6 +169,64 @@ func (registry *Registry) Observe(
 	registry.incidentsByID[incident.ID] = incident
 
 	return incident, true, nil
+}
+
+func (registry *Registry) Claim(
+	ctx context.Context,
+	command ClaimCommand,
+) (Claim, error) {
+	if err := ctx.Err(); err != nil {
+		return Claim{}, err
+	}
+	if err := command.Validate(); err != nil {
+		return Claim{}, err
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	incident, exists := registry.incidentsByID[command.IncidentID]
+	if !exists {
+		return Claim{}, fmt.Errorf(
+			"incident %q was not found",
+			command.IncidentID,
+		)
+	}
+
+	if incident.Version != command.ExpectedVersion {
+		return Claim{}, fmt.Errorf(
+			"%w: incident %q current=%d expected=%d",
+			ErrVersionConflict,
+			incident.ID,
+			incident.Version,
+			command.ExpectedVersion,
+		)
+	}
+
+	currentClaim, claimed := registry.claimsByIncidentID[incident.ID]
+	if claimed &&
+		currentClaim.HolderID != command.HolderID &&
+		command.Now.Before(currentClaim.ExpiresAt) {
+		return Claim{}, fmt.Errorf(
+			"%w: incident %q is held by %q until %s",
+			ErrLeaseHeld,
+			incident.ID,
+			currentClaim.HolderID,
+			currentClaim.ExpiresAt.UTC().Format(time.RFC3339Nano),
+		)
+	}
+
+	incident.Version++
+
+	claim := Claim{
+		Incident:  incident,
+		HolderID:  command.HolderID,
+		ExpiresAt: command.Now.Add(command.LeaseDuration),
+	}
+
+	registry.incidentsByID[incident.ID] = incident
+	registry.claimsByIncidentID[incident.ID] = claim
+
+	return claim, nil
 }
 
 func (registry *Registry) Transition(

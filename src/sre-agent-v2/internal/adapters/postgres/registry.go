@@ -125,6 +125,161 @@ func newIncidentID() (string, error) {
 	return fmt.Sprintf("inc-%x", randomBytes), nil
 }
 
+func (registry *Registry) Claim(
+	ctx context.Context,
+	command incident.ClaimCommand,
+) (incident.Claim, error) {
+	if err := ctx.Err(); err != nil {
+		return incident.Claim{}, err
+	}
+	if err := command.Validate(); err != nil {
+		return incident.Claim{}, err
+	}
+
+	expiresAt := command.Now.Add(command.LeaseDuration)
+
+	const query = `
+UPDATE incidents
+SET
+    version = version + 1,
+    claim_holder = $1,
+    claim_expires_at = $2
+WHERE id = $3
+  AND version = $4
+  AND (
+      claim_holder IS NULL
+      OR claim_holder = $1
+      OR claim_expires_at <= $5
+  )
+RETURNING
+    id,
+    state,
+    version,
+    claim_holder,
+    claim_expires_at
+`
+
+	var (
+		result             incident.Incident
+		state              string
+		version            int64
+		persistedHolder    string
+		persistedExpiresAt time.Time
+	)
+
+	err := registry.pool.QueryRow(
+		ctx,
+		query,
+		command.HolderID,
+		expiresAt,
+		command.IncidentID,
+		command.ExpectedVersion,
+		command.Now,
+	).Scan(
+		&result.ID,
+		&state,
+		&version,
+		&persistedHolder,
+		&persistedExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return incident.Claim{}, registry.explainClaimFailure(
+			ctx,
+			command,
+		)
+	}
+	if err != nil {
+		return incident.Claim{}, fmt.Errorf(
+			"claim incident in PostgreSQL: %w",
+			err,
+		)
+	}
+
+	if version <= 0 {
+		return incident.Claim{}, fmt.Errorf(
+			"claim incident returned invalid version %d",
+			version,
+		)
+	}
+
+	result.State = incident.State(state)
+	result.Version = uint64(version)
+
+	return incident.Claim{
+		Incident:  result,
+		HolderID:  persistedHolder,
+		ExpiresAt: persistedExpiresAt,
+	}, nil
+}
+
+func (registry *Registry) explainClaimFailure(
+	ctx context.Context,
+	command incident.ClaimCommand,
+) error {
+	var (
+		currentVersion   int64
+		currentHolder    string
+		currentExpiresAt time.Time
+	)
+
+	err := registry.pool.QueryRow(
+		ctx,
+		`
+SELECT
+    version,
+    COALESCE(claim_holder, ''),
+    COALESCE(claim_expires_at, 'epoch'::timestamptz)
+FROM incidents
+WHERE id = $1
+`,
+		command.IncidentID,
+	).Scan(
+		&currentVersion,
+		&currentHolder,
+		&currentExpiresAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf(
+			"incident %q was not found",
+			command.IncidentID,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"inspect failed incident claim: %w",
+			err,
+		)
+	}
+
+	if currentVersion <= 0 ||
+		uint64(currentVersion) != command.ExpectedVersion {
+		return fmt.Errorf(
+			"%w: incident %q current=%d expected=%d",
+			incident.ErrVersionConflict,
+			command.IncidentID,
+			currentVersion,
+			command.ExpectedVersion,
+		)
+	}
+
+	if currentHolder != "" &&
+		currentHolder != command.HolderID &&
+		command.Now.Before(currentExpiresAt) {
+		return fmt.Errorf(
+			"%w: incident %q is held by %q until %s",
+			incident.ErrLeaseHeld,
+			command.IncidentID,
+			currentHolder,
+			currentExpiresAt.UTC().Format(time.RFC3339Nano),
+		)
+	}
+
+	return fmt.Errorf(
+		"incident %q claim was not updated",
+		command.IncidentID,
+	)
+}
+
 func (registry *Registry) Transition(
 	ctx context.Context,
 	command incident.TransitionCommand,

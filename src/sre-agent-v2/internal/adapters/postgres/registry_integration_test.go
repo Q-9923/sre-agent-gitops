@@ -989,3 +989,238 @@ WHERE incidents.id = $1
 		)
 	}
 }
+func TestRegistryClaimAllowsOneConcurrentVersionWinner(t *testing.T) {
+	ctx, _, registry := newPostgresTestRegistry(t)
+
+	observed, created, err := registry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-claim",
+				UID:       "pod-uid-postgres-claim",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(2026, 9, 28, 15, 0, 0, 0, time.UTC)
+	holders := []string{"agent-a", "agent-b"}
+
+	type claimResult struct {
+		holderID string
+		claim    incident.Claim
+		err      error
+	}
+
+	start := make(chan struct{})
+	results := make(chan claimResult, len(holders))
+
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(holders))
+
+	for _, holderID := range holders {
+		go func(holderID string) {
+			defer waitGroup.Done()
+			<-start
+
+			claim, claimErr := registry.Claim(
+				ctx,
+				incident.ClaimCommand{
+					IncidentID:      observed.ID,
+					ExpectedVersion: observed.Version,
+					HolderID:        holderID,
+					Now:             now,
+					LeaseDuration:   30 * time.Second,
+				},
+			)
+
+			results <- claimResult{
+				holderID: holderID,
+				claim:    claim,
+				err:      claimErr,
+			}
+		}(holderID)
+	}
+
+	close(start)
+	waitGroup.Wait()
+	close(results)
+
+	successes := 0
+	versionConflicts := 0
+
+	for result := range results {
+		if errors.Is(result.err, incident.ErrVersionConflict) {
+			versionConflicts++
+			continue
+		}
+		if result.err != nil {
+			t.Fatalf(
+				"Claim(%q) error = %v; want nil or ErrVersionConflict",
+				result.holderID,
+				result.err,
+			)
+		}
+
+		successes++
+
+		if result.claim.HolderID != result.holderID {
+			t.Fatalf(
+				"Claim HolderID = %q; want %q",
+				result.claim.HolderID,
+				result.holderID,
+			)
+		}
+		if result.claim.Incident.ID != observed.ID {
+			t.Fatalf(
+				"Claim Incident ID = %q; want %q",
+				result.claim.Incident.ID,
+				observed.ID,
+			)
+		}
+		if result.claim.Incident.State != incident.StateDetected {
+			t.Fatalf(
+				"Claim Incident State = %q; want %q",
+				result.claim.Incident.State,
+				incident.StateDetected,
+			)
+		}
+		if result.claim.Incident.Version != 2 {
+			t.Fatalf(
+				"Claim Incident Version = %d; want 2",
+				result.claim.Incident.Version,
+			)
+		}
+		if !result.claim.ExpiresAt.Equal(now.Add(30 * time.Second)) {
+			t.Fatalf(
+				"Claim ExpiresAt = %s; want %s",
+				result.claim.ExpiresAt,
+				now.Add(30*time.Second),
+			)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf("successful Claims = %d; want 1", successes)
+	}
+	if versionConflicts != 1 {
+		t.Fatalf(
+			"Claim version conflicts = %d; want 1",
+			versionConflicts,
+		)
+	}
+}
+func TestRegistryClaimLeaseSurvivesAdapterRestartAndExpires(
+	t *testing.T,
+) {
+	ctx, pool, firstRegistry := newPostgresTestRegistry(t)
+
+	observed, created, err := firstRegistry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "KubePodCrashLooping",
+			Target: incident.Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-persisted-lease",
+				UID:       "pod-uid-persisted-lease",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(2026, 9, 28, 16, 0, 0, 0, time.UTC)
+
+	firstClaim, err := firstRegistry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: observed.Version,
+			HolderID:        "agent-a",
+			Now:             now,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v; want nil", err)
+	}
+
+	restartedRegistry := NewRegistry(pool)
+
+	_, err = restartedRegistry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: firstClaim.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             now.Add(10 * time.Second),
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if !errors.Is(err, incident.ErrLeaseHeld) {
+		t.Fatalf(
+			"active Lease Claim() error = %v; want ErrLeaseHeld",
+			err,
+		)
+	}
+
+	takeover, err := restartedRegistry.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      observed.ID,
+			ExpectedVersion: firstClaim.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             firstClaim.ExpiresAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("expired Lease takeover error = %v; want nil", err)
+	}
+	if takeover.HolderID != "agent-b" {
+		t.Fatalf(
+			"takeover HolderID = %q; want %q",
+			takeover.HolderID,
+			"agent-b",
+		)
+	}
+	if takeover.Incident.State != incident.StateDetected {
+		t.Fatalf(
+			"takeover State = %q; want %q",
+			takeover.Incident.State,
+			incident.StateDetected,
+		)
+	}
+	if takeover.Incident.Version != 3 {
+		t.Fatalf(
+			"takeover Version = %d; want 3",
+			takeover.Incident.Version,
+		)
+	}
+
+	expectedExpiry := now.Add(60 * time.Second)
+	if !takeover.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf(
+			"takeover ExpiresAt = %s; want %s",
+			takeover.ExpiresAt,
+			expectedExpiry,
+		)
+	}
+}

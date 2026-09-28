@@ -21,6 +21,22 @@ _Avoid_: Alert, Observation
 **Transition**:
 Incident 从一个合法状态进入另一个合法状态的领域变化。
 
+**Claim**:
+Lease Holder 对某个 Active Incident 获得的限时排他推进权；Claim 只协调处理权，不代表 Approval 或修复授权。
+_Avoid_: Approval, Remediation
+
+**Lease**:
+Claim 保持有效的期限；Lease 到期后，其他 Lease Holder 可以重新竞争该 Incident 的 Claim。
+_Avoid_: Cooldown, Approval Expiry
+
+**Lease Holder**:
+当前持有 Incident Claim、可以尝试推进其生命周期的 Agent 实例。
+_Avoid_: Approver, Actor
+
+**Fencing Token**:
+每次 Claim 成功后递增的单调代次；持有旧代次的 Lease Holder 不得继续推进 Incident。
+_Avoid_: Credential, Secret
+
 **Plan**:
 针对特定 Incident 和目标资源生成的候选修复方案。
 

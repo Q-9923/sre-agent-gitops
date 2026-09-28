@@ -3,7 +3,9 @@ package incident
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestRegistryObserveReturnsExistingActiveIncidentForSameIdempotencyKey(
@@ -592,5 +594,392 @@ func TestRegistryTransitionFromDiagnosedToResolvedReleasesIncident(
 			"recurrent Version = %d; want 1",
 			recurrent.Version,
 		)
+	}
+}
+func TestRegistryClaimAllowsOneConcurrentVersionWinner(t *testing.T) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+
+	observed, created, err := registry.Observe(
+		ctx,
+		Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "PodCrashLooping",
+			Target: Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-claim",
+				UID:       "pod-uid-claim",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	leaseDuration := 30 * time.Second
+	holders := []string{"agent-a", "agent-b"}
+
+	type claimResult struct {
+		holderID string
+		claim    Claim
+		err      error
+	}
+
+	start := make(chan struct{})
+	results := make(chan claimResult, len(holders))
+
+	var ready sync.WaitGroup
+	ready.Add(len(holders))
+
+	for _, holderID := range holders {
+		go func(holderID string) {
+			ready.Done()
+			<-start
+
+			claim, claimErr := registry.Claim(
+				ctx,
+				ClaimCommand{
+					IncidentID:      observed.ID,
+					ExpectedVersion: observed.Version,
+					HolderID:        holderID,
+					Now:             now,
+					LeaseDuration:   leaseDuration,
+				},
+			)
+
+			results <- claimResult{
+				holderID: holderID,
+				claim:    claim,
+				err:      claimErr,
+			}
+		}(holderID)
+	}
+
+	ready.Wait()
+	close(start)
+
+	successes := 0
+	versionConflicts := 0
+
+	for range holders {
+		result := <-results
+
+		if errors.Is(result.err, ErrVersionConflict) {
+			versionConflicts++
+			continue
+		}
+		if result.err != nil {
+			t.Fatalf(
+				"Claim(%q) error = %v; want nil or ErrVersionConflict",
+				result.holderID,
+				result.err,
+			)
+		}
+
+		successes++
+
+		if result.claim.HolderID != result.holderID {
+			t.Fatalf(
+				"Claim HolderID = %q; want %q",
+				result.claim.HolderID,
+				result.holderID,
+			)
+		}
+		if result.claim.Incident.ID != observed.ID {
+			t.Fatalf(
+				"Claim Incident ID = %q; want %q",
+				result.claim.Incident.ID,
+				observed.ID,
+			)
+		}
+		if result.claim.Incident.State != StateDetected {
+			t.Fatalf(
+				"Claim Incident State = %q; want %q",
+				result.claim.Incident.State,
+				StateDetected,
+			)
+		}
+		if result.claim.Incident.Version != 2 {
+			t.Fatalf(
+				"Claim Incident Version = %d; want 2",
+				result.claim.Incident.Version,
+			)
+		}
+
+		expectedExpiry := now.Add(leaseDuration)
+		if !result.claim.ExpiresAt.Equal(expectedExpiry) {
+			t.Fatalf(
+				"Claim ExpiresAt = %s; want %s",
+				result.claim.ExpiresAt,
+				expectedExpiry,
+			)
+		}
+	}
+
+	if successes != 1 {
+		t.Fatalf("successful Claims = %d; want 1", successes)
+	}
+	if versionConflicts != 1 {
+		t.Fatalf(
+			"Claim version conflicts = %d; want 1",
+			versionConflicts,
+		)
+	}
+}
+func TestRegistryClaimRejectsDifferentHolderWhileLeaseIsActive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+
+	incident, created, err := registry.Observe(
+		ctx,
+		Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "PodCrashLooping",
+			Target: Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-active-lease",
+				UID:       "pod-uid-active-lease",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+
+	first, err := registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      incident.ID,
+			ExpectedVersion: incident.Version,
+			HolderID:        "agent-a",
+			Now:             now,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v; want nil", err)
+	}
+
+	_, err = registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      incident.ID,
+			ExpectedVersion: first.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             now.Add(10 * time.Second),
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf(
+			"second Claim() error = %v; want ErrLeaseHeld",
+			err,
+		)
+	}
+}
+func TestRegistryClaimAllowsDifferentHolderAfterLeaseExpires(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+
+	incident, created, err := registry.Observe(
+		ctx,
+		Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: "PodCrashLooping",
+			Target: Target{
+				Kind:      "Pod",
+				Namespace: "sre-agent-lab",
+				Name:      "crash-app-expired-lease",
+				UID:       "pod-uid-expired-lease",
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	now := time.Date(2026, 9, 28, 13, 0, 0, 0, time.UTC)
+
+	first, err := registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      incident.ID,
+			ExpectedVersion: 1,
+			HolderID:        "agent-a",
+			Now:             now,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("first Claim() error = %v; want nil", err)
+	}
+
+	takeover, err := registry.Claim(
+		ctx,
+		ClaimCommand{
+			IncidentID:      incident.ID,
+			ExpectedVersion: first.Incident.Version,
+			HolderID:        "agent-b",
+			Now:             first.ExpiresAt,
+			LeaseDuration:   30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("takeover Claim() error = %v; want nil", err)
+	}
+	if takeover.HolderID != "agent-b" {
+		t.Fatalf(
+			"takeover HolderID = %q; want %q",
+			takeover.HolderID,
+			"agent-b",
+		)
+	}
+	if takeover.Incident.State != StateDetected {
+		t.Fatalf(
+			"takeover Incident State = %q; want %q",
+			takeover.Incident.State,
+			StateDetected,
+		)
+	}
+	if takeover.Incident.Version != 3 {
+		t.Fatalf(
+			"takeover Incident Version = %d; want 3",
+			takeover.Incident.Version,
+		)
+	}
+
+	expectedExpiry := now.Add(60 * time.Second)
+	if !takeover.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf(
+			"takeover ExpiresAt = %s; want %s",
+			takeover.ExpiresAt,
+			expectedExpiry,
+		)
+	}
+}
+func TestRegistryClaimRejectsInvalidCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*ClaimCommand)
+	}{
+		{
+			name: "missing incident ID",
+			mutate: func(command *ClaimCommand) {
+				command.IncidentID = " "
+			},
+		},
+		{
+			name: "zero expected version",
+			mutate: func(command *ClaimCommand) {
+				command.ExpectedVersion = 0
+			},
+		},
+		{
+			name: "missing holder ID",
+			mutate: func(command *ClaimCommand) {
+				command.HolderID = " "
+			},
+		},
+		{
+			name: "zero current time",
+			mutate: func(command *ClaimCommand) {
+				command.Now = time.Time{}
+			},
+		},
+		{
+			name: "zero lease duration",
+			mutate: func(command *ClaimCommand) {
+				command.LeaseDuration = 0
+			},
+		},
+		{
+			name: "negative lease duration",
+			mutate: func(command *ClaimCommand) {
+				command.LeaseDuration = -time.Second
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := NewMemoryRegistry()
+			ctx := context.Background()
+
+			incident, created, err := registry.Observe(
+				ctx,
+				Observation{
+					Source:    "prometheus",
+					Cluster:   "dev",
+					AlertName: "PodCrashLooping",
+					Target: Target{
+						Kind:      "Pod",
+						Namespace: "sre-agent-lab",
+						Name:      "crash-app-invalid-claim",
+						UID:       "pod-uid-invalid-claim",
+					},
+				},
+			)
+			if err != nil {
+				t.Fatalf("Observe() error = %v; want nil", err)
+			}
+			if !created {
+				t.Fatal("Observe() created = false; want true")
+			}
+
+			command := ClaimCommand{
+				IncidentID:      incident.ID,
+				ExpectedVersion: incident.Version,
+				HolderID:        "agent-a",
+				Now: time.Date(
+					2026,
+					9,
+					28,
+					14,
+					0,
+					0,
+					0,
+					time.UTC,
+				),
+				LeaseDuration: 30 * time.Second,
+			}
+			test.mutate(&command)
+
+			_, err = registry.Claim(ctx, command)
+			if !errors.Is(err, ErrInvalidClaim) {
+				t.Fatalf(
+					"Claim() error = %v; want ErrInvalidClaim",
+					err,
+				)
+			}
+		})
 	}
 }
