@@ -97,16 +97,9 @@ func Validate(granted Approval, plan Plan, now time.Time) error {
 		return ErrInvalidPlan
 	}
 
-	if invalidIdentity(granted.IncidentID) ||
-		invalidIdentity(granted.PlanHash) ||
-		invalidIdentity(granted.TargetUID) ||
-		invalidIdentity(granted.ApprovedBy) ||
-		granted.ApprovedAt.IsZero() ||
-		granted.ExpiresAt.IsZero() ||
-		!granted.ExpiresAt.After(granted.ApprovedAt) {
-		return ErrInvalidApproval
+	if err := validateApprovalRecord(granted); err != nil {
+		return err
 	}
-
 	if granted.IncidentID != plan.IncidentID {
 		return ErrIncidentMismatch
 	}
@@ -125,6 +118,20 @@ func Validate(granted Approval, plan Plan, now time.Time) error {
 
 	if !now.Before(granted.ExpiresAt) {
 		return ErrApprovalExpired
+	}
+
+	return nil
+}
+
+func validateApprovalRecord(granted Approval) error {
+	if invalidIdentity(granted.IncidentID) ||
+		invalidIdentity(granted.PlanHash) ||
+		invalidIdentity(granted.TargetUID) ||
+		invalidIdentity(granted.ApprovedBy) ||
+		granted.ApprovedAt.IsZero() ||
+		granted.ExpiresAt.IsZero() ||
+		!granted.ExpiresAt.After(granted.ApprovedAt) {
+		return ErrInvalidApproval
 	}
 
 	return nil
