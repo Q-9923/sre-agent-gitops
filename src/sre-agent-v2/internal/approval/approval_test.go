@@ -6,295 +6,364 @@ import (
 	"time"
 )
 
-func TestValidateRejectsApprovalForDifferentTargetUID(t *testing.T) {
+var approvalTestNow = time.Date(
+	2026,
+	time.September,
+	28,
+	17,
+	35,
+	0,
+	0,
+	time.UTC,
+)
+
+func TestNewPlanBuildsCanonicalHash(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		0,
-		0,
-		0,
-		time.UTC,
-	)
+	plan := mustNewPlan(t, validPlanCommand())
 
-	plan := Plan{
-		IncidentID: "inc-approval-target-uid",
-		Hash:       "sha256:approved-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   plan.Hash,
-		TargetUID:  "pod-uid-replaced",
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrTargetUIDMismatch) {
+	const wantHash = "sha256:05be5048e1d75d42d1c293a8798e94afcdf02a82f1dee536f114c542ffed2999"
+	if plan.Hash != wantHash {
 		t.Fatalf(
-			"Validate() error = %v; want ErrTargetUIDMismatch",
-			err,
-		)
-	}
-}
-func TestValidateRejectsApprovalForDifferentPlanHash(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		5,
-		0,
-		0,
-		time.UTC,
-	)
-
-	plan := Plan{
-		IncidentID: "inc-approval-plan-hash",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   "sha256:previous-plan",
-		TargetUID:  plan.TargetUID,
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrPlanHashMismatch) {
-		t.Fatalf(
-			"Validate() error = %v; want ErrPlanHashMismatch",
-			err,
-		)
-	}
-}
-func TestValidateRejectsApprovalForDifferentIncidentID(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		10,
-		0,
-		0,
-		time.UTC,
-	)
-
-	plan := Plan{
-		IncidentID: "inc-current",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: "inc-previous",
-		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrIncidentMismatch) {
-		t.Fatalf(
-			"Validate() error = %v; want ErrIncidentMismatch",
-			err,
-		)
-	}
-}
-func TestValidateRejectsApprovalAtExpiry(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		15,
-		0,
-		0,
-		time.UTC,
-	)
-
-	plan := Plan{
-		IncidentID: "inc-expired-approval",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now,
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrApprovalExpired) {
-		t.Fatalf(
-			"Validate() error = %v; want ErrApprovalExpired",
-			err,
+			"NewPlan() Hash = %q; want %q",
+			plan.Hash,
+			wantHash,
 		)
 	}
 }
 
-func TestValidateRejectsApprovalWithoutApprover(t *testing.T) {
+func TestNewPlanHashChangesWhenTargetUIDChanges(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		20,
-		0,
-		0,
-		time.UTC,
-	)
+	firstCommand := validPlanCommand()
+	first := mustNewPlan(t, firstCommand)
 
-	plan := Plan{
-		IncidentID: "inc-missing-approver",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
+	secondCommand := validPlanCommand()
+	secondCommand.Target.UID = "pod-uid-456"
+	second := mustNewPlan(t, secondCommand)
 
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrInvalidApproval) {
+	if first.Hash == second.Hash {
 		t.Fatalf(
-			"Validate() error = %v; want ErrInvalidApproval",
+			"NewPlan() generated the same Hash %q for different target UIDs",
+			first.Hash,
+		)
+	}
+}
+
+func TestNewPlanRejectsInvalidCommand(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*PlanCommand)
+	}{
+		{
+			name: "missing incident ID",
+			mutate: func(command *PlanCommand) {
+				command.IncidentID = ""
+			},
+		},
+		{
+			name: "missing action",
+			mutate: func(command *PlanCommand) {
+				command.Action = ""
+			},
+		},
+		{
+			name: "missing cluster",
+			mutate: func(command *PlanCommand) {
+				command.Target.Cluster = ""
+			},
+		},
+		{
+			name: "missing namespace",
+			mutate: func(command *PlanCommand) {
+				command.Target.Namespace = ""
+			},
+		},
+		{
+			name: "missing kind",
+			mutate: func(command *PlanCommand) {
+				command.Target.Kind = ""
+			},
+		},
+		{
+			name: "missing name",
+			mutate: func(command *PlanCommand) {
+				command.Target.Name = ""
+			},
+		},
+		{
+			name: "missing UID",
+			mutate: func(command *PlanCommand) {
+				command.Target.UID = ""
+			},
+		},
+		{
+			name: "canonical delimiter in field",
+			mutate: func(command *PlanCommand) {
+				command.Action = "RESTART\x00POD"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				t.Parallel()
+
+				command := validPlanCommand()
+				test.mutate(&command)
+
+				_, err := NewPlan(command)
+				if !errors.Is(err, ErrInvalidPlan) {
+					t.Fatalf(
+						"NewPlan() error = %v; want ErrInvalidPlan",
+						err,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestValidateRejectsMismatchedIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*Approval)
+		want   error
+	}{
+		{
+			name: "incident ID",
+			mutate: func(granted *Approval) {
+				granted.IncidentID = "inc-previous"
+			},
+			want: ErrIncidentMismatch,
+		},
+		{
+			name: "plan hash",
+			mutate: func(granted *Approval) {
+				granted.PlanHash = "sha256:previous-plan"
+			},
+			want: ErrPlanHashMismatch,
+		},
+		{
+			name: "target UID",
+			mutate: func(granted *Approval) {
+				granted.TargetUID = "pod-uid-replaced"
+			},
+			want: ErrTargetUIDMismatch,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				t.Parallel()
+
+				plan := mustNewPlan(t, validPlanCommand())
+				granted := validApproval(plan)
+				test.mutate(&granted)
+
+				err := Validate(granted, plan, approvalTestNow)
+				if !errors.Is(err, test.want) {
+					t.Fatalf(
+						"Validate() error = %v; want %v",
+						err,
+						test.want,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestValidateRejectsInvalidApproval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mutate func(*Approval)
+	}{
+		{
+			name: "missing approver",
+			mutate: func(granted *Approval) {
+				granted.ApprovedBy = ""
+			},
+		},
+		{
+			name: "missing approved time",
+			mutate: func(granted *Approval) {
+				granted.ApprovedAt = time.Time{}
+			},
+		},
+		{
+			name: "missing expiry time",
+			mutate: func(granted *Approval) {
+				granted.ExpiresAt = time.Time{}
+			},
+		},
+		{
+			name: "zero length validity window",
+			mutate: func(granted *Approval) {
+				granted.ExpiresAt = granted.ApprovedAt
+			},
+		},
+		{
+			name: "reversed validity window",
+			mutate: func(granted *Approval) {
+				granted.ExpiresAt = granted.ApprovedAt.Add(-time.Second)
+			},
+		},
+		{
+			name: "canonical delimiter in approver",
+			mutate: func(granted *Approval) {
+				granted.ApprovedBy = "operator\x00a"
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				t.Parallel()
+
+				plan := mustNewPlan(t, validPlanCommand())
+				granted := validApproval(plan)
+				test.mutate(&granted)
+
+				err := Validate(granted, plan, approvalTestNow)
+				if !errors.Is(err, ErrInvalidApproval) {
+					t.Fatalf(
+						"Validate() error = %v; want ErrInvalidApproval",
+						err,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestValidateRejectsInactiveApproval(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want error
+	}{
+		{
+			name: "before approved time",
+			now:  approvalTestNow.Add(-2 * time.Minute),
+			want: ErrApprovalNotYetValid,
+		},
+		{
+			name: "at expiry",
+			now:  approvalTestNow.Add(time.Minute),
+			want: ErrApprovalExpired,
+		},
+		{
+			name: "after expiry",
+			now:  approvalTestNow.Add(2 * time.Minute),
+			want: ErrApprovalExpired,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				t.Parallel()
+
+				plan := mustNewPlan(t, validPlanCommand())
+				granted := validApproval(plan)
+
+				err := Validate(granted, plan, test.now)
+				if !errors.Is(err, test.want) {
+					t.Fatalf(
+						"Validate() error = %v; want %v",
+						err,
+						test.want,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestValidateRejectsTamperedPlanHash(t *testing.T) {
+	t.Parallel()
+
+	plan := mustNewPlan(t, validPlanCommand())
+	plan.Hash = "sha256:tampered"
+
+	granted := validApproval(plan)
+
+	err := Validate(granted, plan, approvalTestNow)
+	if !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf(
+			"Validate() error = %v; want ErrInvalidPlan",
 			err,
 		)
 	}
 }
-func TestValidateRejectsInvalidApprovalWindow(t *testing.T) {
-	t.Parallel()
 
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		25,
-		0,
-		0,
-		time.UTC,
-	)
-
-	plan := Plan{
-		IncidentID: "inc-invalid-approval-window",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(2 * time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrInvalidApproval) {
-		t.Fatalf(
-			"Validate() error = %v; want ErrInvalidApproval",
-			err,
-		)
-	}
-}
-func TestValidateRejectsApprovalBeforeApprovedAt(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		30,
-		0,
-		0,
-		time.UTC,
-	)
-
-	plan := Plan{
-		IncidentID: "inc-future-approval",
-		Hash:       "sha256:current-plan",
-		TargetUID:  "pod-uid-current",
-	}
-
-	granted := Approval{
-		IncidentID: plan.IncidentID,
-		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
-		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(time.Minute),
-		ExpiresAt:  now.Add(2 * time.Minute),
-	}
-
-	err := Validate(granted, plan, now)
-	if !errors.Is(err, ErrApprovalNotYetValid) {
-		t.Fatalf(
-			"Validate() error = %v; want ErrApprovalNotYetValid",
-			err,
-		)
-	}
-}
 func TestValidateAcceptsMatchingActiveApproval(t *testing.T) {
 	t.Parallel()
 
-	now := time.Date(
-		2026,
-		time.September,
-		28,
-		17,
-		35,
-		0,
-		0,
-		time.UTC,
-	)
+	plan := mustNewPlan(t, validPlanCommand())
+	granted := validApproval(plan)
 
-	plan := Plan{
-		IncidentID: "inc-valid-approval",
-		Hash:       "sha256:approved-plan",
-		TargetUID:  "pod-uid-current",
+	if err := Validate(granted, plan, approvalTestNow); err != nil {
+		t.Fatalf("Validate() error = %v; want nil", err)
+	}
+}
+
+func validPlanCommand() PlanCommand {
+	return PlanCommand{
+		IncidentID: "inc-canonical-plan",
+		Action:     "RESTART_POD",
+		Target: Target{
+			Cluster:   "dev",
+			Namespace: "sre-agent-lab",
+			Kind:      "Pod",
+			Name:      "crash-app-abc",
+			UID:       "pod-uid-123",
+		},
+	}
+}
+
+func mustNewPlan(t *testing.T, command PlanCommand) Plan {
+	t.Helper()
+
+	plan, err := NewPlan(command)
+	if err != nil {
+		t.Fatalf("NewPlan() error = %v; want nil", err)
 	}
 
-	granted := Approval{
+	return plan
+}
+
+func validApproval(plan Plan) Approval {
+	return Approval{
 		IncidentID: plan.IncidentID,
 		PlanHash:   plan.Hash,
-		TargetUID:  plan.TargetUID,
+		TargetUID:  plan.Target.UID,
 		ApprovedBy: "operator-a",
-		ApprovedAt: now.Add(-time.Minute),
-		ExpiresAt:  now.Add(time.Minute),
-	}
-
-	if err := Validate(granted, plan, now); err != nil {
-		t.Fatalf("Validate() error = %v; want nil", err)
+		ApprovedAt: approvalTestNow.Add(-time.Minute),
+		ExpiresAt:  approvalTestNow.Add(time.Minute),
 	}
 }
