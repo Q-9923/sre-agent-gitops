@@ -97,6 +97,7 @@ func main() {
 		config,
 		kubernetesClient,
 		incidentHandle.Registry,
+		incidentHandle.Approvals,
 		logger,
 		liveness.markProgress,
 		readiness.markSuccessfulCycle,

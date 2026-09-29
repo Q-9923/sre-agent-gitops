@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	postgresadapter "sre-agent/internal/adapters/postgres"
+	approvaldomain "sre-agent/internal/approval"
 	"sre-agent/internal/incident"
 )
 
@@ -27,8 +28,9 @@ type incidentRegistry interface {
 }
 
 type incidentRegistryHandle struct {
-	Registry incidentRegistry
-	close    func()
+	Registry  incidentRegistry
+	Approvals approvaldomain.Store
+	close     func()
 }
 
 func (handle incidentRegistryHandle) Close() {
@@ -48,10 +50,10 @@ func openIncidentRegistry(
 	switch config.IncidentStoreBackend {
 	case "memory":
 		return incidentRegistryHandle{
-			Registry: incident.NewMemoryRegistry(),
-			close:    func() {},
+			Registry:  incident.NewMemoryRegistry(),
+			Approvals: approvaldomain.NewMemoryStore(),
+			close:     func() {},
 		}, nil
-
 	case "postgres":
 		poolConfig, err := pgxpool.ParseConfig(
 			config.IncidentStorePostgresDSN,
@@ -108,8 +110,9 @@ func openIncidentRegistry(
 		}
 
 		return incidentRegistryHandle{
-			Registry: postgresadapter.NewRegistry(pool),
-			close:    pool.Close,
+			Registry:  postgresadapter.NewRegistry(pool),
+			Approvals: postgresadapter.NewApprovalStore(pool),
+			close:     pool.Close,
 		}, nil
 
 	default:

@@ -14,10 +14,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	"sre-agent/internal/approval"
 	"sre-agent/internal/incident"
 )
 
-func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *testing.T) {
+func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(
+	t *testing.T,
+) {
 	observedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 	alert := Alert{
 		Labels: map[string]string{
@@ -25,59 +28,565 @@ func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(t *test
 			"namespace": "default",
 			"pod":       "crash-app-a",
 		},
-		Annotations: map[string]string{"description": "CrashLoopBackOff"},
-		State:       "firing",
-		ActiveAt:    observedAt,
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
 	}
 	podEvidence := PodEvidence{
 		Target: DecisionTarget{
-			Cluster: "dev", Namespace: "default", Kind: "Pod", Name: "crash-app-a", UID: "pod-uid-a",
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-a",
+			UID:       "pod-uid-a",
 		},
-		Owner: OwnerEvidence{Kind: "ReplicaSet", Name: "crash-app-rs", UID: "rs-uid"},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid",
+		},
 		Containers: []ContainerEvidence{
-			{Name: "main", State: "waiting", Reason: "CrashLoopBackOff", RestartCount: 4},
+			{
+				Name:         "main",
+				State:        "waiting",
+				Reason:       "CrashLoopBackOff",
+				RestartCount: 4,
+			},
 		},
 	}
-	incidentID := incidentIDFor(alert, podEvidence.Target.UID)
+
+	legacyIncidentID := incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
 	decision := policyTestDecision(ActionRestartPod)
-	decision.IncidentID = incidentID
+	decision.IncidentID = legacyIncidentID
 	decision.Target = podEvidence.Target
 
-	kubernetesClient := fake.NewSimpleClientset(&v1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name: podEvidence.Target.Name, Namespace: podEvidence.Target.Namespace, UID: types.UID(podEvidence.Target.UID),
-	}})
-	collector := &stubContextCollector{evidence: podEvidence}
+	ctx := context.Background()
+	registry := incident.NewMemoryRegistry()
+	lifecycleIncident, _, err := registry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: alert.Labels["alertname"],
+			Target: incident.Target{
+				Kind:      podEvidence.Target.Kind,
+				Namespace: podEvidence.Target.Namespace,
+				Name:      podEvidence.Target.Name,
+				UID:       podEvidence.Target.UID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+
+	approvalStore := approval.NewMemoryStore()
+	mustGrantApproval(
+		t,
+		approvalStore,
+		lifecycleIncident.ID,
+		string(decision.Action),
+		podEvidence.Target,
+		observedAt,
+	)
+
+	kubernetesClient := fake.NewSimpleClientset(
+		&v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podEvidence.Target.Name,
+				Namespace: podEvidence.Target.Namespace,
+				UID:       types.UID(podEvidence.Target.UID),
+			},
+		},
+	)
 	decider := &stubDecisionSource{decision: decision}
+
 	agent := &sreAgent{
 		config: agentConfig{
-			ClusterName:              "dev",
-			AllowedNamespaces:        []string{"default"},
-			AllowedControllerKinds:   []string{"ReplicaSet"},
-			RestartPodApproved:       true,
-			MinimumConfidence:        0.90,
-			RestartCooldown:          10 * time.Minute,
-			AttemptWindow:            time.Hour,
-			MaximumAttempts:          1,
-			OllamaTimeout:            time.Second,
-			KubernetesRequestTimeout: time.Second,
+			ClusterName:                "dev",
+			AllowedNamespaces:          []string{"default"},
+			AllowedControllerKinds:     []string{"ReplicaSet"},
+			RestartPodApproved:         true,
+			MinimumConfidence:          0.90,
+			RestartCooldown:            10 * time.Minute,
+			AttemptWindow:              time.Hour,
+			MaximumAttempts:            1,
+			OllamaTimeout:              time.Second,
+			KubernetesRequestTimeout:   time.Second,
+			IncidentClaimHolderID:      "agent-a",
+			IncidentClaimLeaseDuration: 30 * time.Second,
 		},
 		kubernetes: kubernetesClient,
-		collector:  collector,
+		collector:  &stubContextCollector{evidence: podEvidence},
 		ollama:     decider,
-		incidents:  incident.NewMemoryRegistry(),
+		incidents:  registry,
+		approvals:  approvalStore,
 		memory:     newRemediationMemory(),
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:        func() time.Time { return observedAt },
 	}
 
-	agent.handlePodCrashLooping(context.Background(), alert)
+	agent.handlePodCrashLooping(ctx, alert)
 
-	if decider.received.IncidentID != incidentID || decider.received.Pod.Target.UID != "pod-uid-a" {
-		t.Fatalf("decider received %#v; want current incident and observed Pod UID", decider.received)
+	if decider.received.IncidentID != legacyIncidentID ||
+		decider.received.Pod.Target.UID != "pod-uid-a" {
+		t.Fatalf(
+			"decider received %#v; want current incident and observed Pod UID",
+			decider.received,
+		)
 	}
+
 	actions := kubernetesClient.Actions()
-	if len(actions) != 1 || actions[0].GetVerb() != "delete" || actions[0].GetResource().Resource != "pods" {
-		t.Fatalf("Kubernetes actions = %#v; want exactly one Pod delete", actions)
+	if len(actions) != 1 ||
+		actions[0].GetVerb() != "delete" ||
+		actions[0].GetResource().Resource != "pods" {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want exactly one Pod delete",
+			actions,
+		)
+	}
+}
+
+func TestHandlePodCrashLoopingDoesNotActWithoutStoredApproval(t *testing.T) {
+	observedAt := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-unapproved",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-unapproved",
+			UID:       "pod-uid-unapproved",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-unapproved",
+		},
+		Containers: []ContainerEvidence{
+			{
+				Name:         "main",
+				State:        "waiting",
+				Reason:       "CrashLoopBackOff",
+				RestartCount: 4,
+			},
+		},
+	}
+
+	incidentID := incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = incidentID
+	decision.Target = podEvidence.Target
+
+	kubernetesClient := fake.NewSimpleClientset(
+		&v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podEvidence.Target.Name,
+				Namespace: podEvidence.Target.Namespace,
+				UID:       types.UID(podEvidence.Target.UID),
+			},
+		},
+	)
+	decider := &stubDecisionSource{
+		decision: decision,
+	}
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:                "dev",
+			AllowedNamespaces:          []string{"default"},
+			AllowedControllerKinds:     []string{"ReplicaSet"},
+			RestartPodApproved:         true,
+			MinimumConfidence:          0.90,
+			RestartCooldown:            10 * time.Minute,
+			AttemptWindow:              time.Hour,
+			MaximumAttempts:            1,
+			OllamaTimeout:              time.Second,
+			KubernetesRequestTimeout:   time.Second,
+			IncidentClaimHolderID:      "agent-a",
+			IncidentClaimLeaseDuration: 30 * time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector:  &stubContextCollector{evidence: podEvidence},
+		ollama:     decider,
+		incidents:  incident.NewMemoryRegistry(),
+		approvals:  approval.NewMemoryStore(),
+		memory:     newRemediationMemory(),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:        func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(
+		context.Background(),
+		alert,
+	)
+
+	if decider.calls != 1 {
+		t.Fatalf(
+			"decision source calls = %d; want 1 before approval lookup",
+			decider.calls,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none without stored approval",
+			actions,
+		)
+	}
+}
+
+func TestHandlePodCrashLoopingFailsClosedForInvalidOrUnavailableApproval(
+	t *testing.T,
+) {
+	observedAt := time.Date(2026, 9, 29, 10, 30, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		mutate    func(*approval.Approval)
+		lookupErr error
+	}{
+		{
+			name: "expired approval",
+			mutate: func(granted *approval.Approval) {
+				granted.ExpiresAt = observedAt
+			},
+		},
+		{
+			name: "tampered plan hash",
+			mutate: func(granted *approval.Approval) {
+				granted.PlanHash = "sha256:tampered"
+			},
+		},
+		{
+			name: "tampered target UID",
+			mutate: func(granted *approval.Approval) {
+				granted.TargetUID = "different-pod-uid"
+			},
+		},
+		{
+			name:      "approval store unavailable",
+			lookupErr: errors.New("approval store unavailable"),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			alert := Alert{
+				Labels: map[string]string{
+					"alertname": podCrashLoopingAlert,
+					"namespace": "default",
+					"pod":       "crash-app-approval-failure",
+				},
+				Annotations: map[string]string{
+					"description": "CrashLoopBackOff",
+				},
+				State:    "firing",
+				ActiveAt: observedAt,
+			}
+			podEvidence := PodEvidence{
+				Target: DecisionTarget{
+					Cluster:   "dev",
+					Namespace: "default",
+					Kind:      "Pod",
+					Name:      "crash-app-approval-failure",
+					UID:       "pod-uid-approval-failure",
+				},
+				Owner: OwnerEvidence{
+					Kind: "ReplicaSet",
+					Name: "crash-app-rs",
+					UID:  "rs-uid-approval-failure",
+				},
+			}
+
+			decision := policyTestDecision(ActionRestartPod)
+			decision.IncidentID = incidentIDFor(
+				alert,
+				podEvidence.Target.UID,
+			)
+			decision.Target = podEvidence.Target
+
+			ctx := context.Background()
+			registry := incident.NewMemoryRegistry()
+			lifecycleIncident, _, err := registry.Observe(
+				ctx,
+				incident.Observation{
+					Source:    "prometheus",
+					Cluster:   "dev",
+					AlertName: alert.Labels["alertname"],
+					Target: incident.Target{
+						Kind:      podEvidence.Target.Kind,
+						Namespace: podEvidence.Target.Namespace,
+						Name:      podEvidence.Target.Name,
+						UID:       podEvidence.Target.UID,
+					},
+				},
+			)
+			if err != nil {
+				t.Fatalf("Observe() error = %v", err)
+			}
+
+			plan, err := approval.NewPlan(
+				approval.PlanCommand{
+					IncidentID: lifecycleIncident.ID,
+					Action:     string(decision.Action),
+					Target: approval.Target{
+						Cluster:   podEvidence.Target.Cluster,
+						Namespace: podEvidence.Target.Namespace,
+						Kind:      podEvidence.Target.Kind,
+						Name:      podEvidence.Target.Name,
+						UID:       podEvidence.Target.UID,
+					},
+				},
+			)
+			if err != nil {
+				t.Fatalf("NewPlan() error = %v", err)
+			}
+
+			granted := approval.Approval{
+				IncidentID: plan.IncidentID,
+				PlanHash:   plan.Hash,
+				TargetUID:  plan.Target.UID,
+				ApprovedBy: "operator-a",
+				ApprovedAt: observedAt.Add(-time.Minute),
+				ExpiresAt:  observedAt.Add(time.Hour),
+			}
+			if test.mutate != nil {
+				test.mutate(&granted)
+			}
+
+			approvalStore := &staticApprovalStore{
+				granted:   granted,
+				lookupErr: test.lookupErr,
+			}
+			kubernetesClient := fake.NewSimpleClientset(
+				&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      podEvidence.Target.Name,
+						Namespace: podEvidence.Target.Namespace,
+						UID:       types.UID(podEvidence.Target.UID),
+					},
+				},
+			)
+			var logOutput bytes.Buffer
+
+			agent := &sreAgent{
+				config: agentConfig{
+					ClusterName:                "dev",
+					AllowedNamespaces:          []string{"default"},
+					AllowedControllerKinds:     []string{"ReplicaSet"},
+					RestartPodApproved:         true,
+					MinimumConfidence:          0.90,
+					RestartCooldown:            10 * time.Minute,
+					AttemptWindow:              time.Hour,
+					MaximumAttempts:            1,
+					OllamaTimeout:              time.Second,
+					KubernetesRequestTimeout:   time.Second,
+					IncidentClaimHolderID:      "agent-a",
+					IncidentClaimLeaseDuration: 30 * time.Second,
+				},
+				kubernetes: kubernetesClient,
+				collector:  &stubContextCollector{evidence: podEvidence},
+				ollama: &stubDecisionSource{
+					decision: decision,
+				},
+				incidents: registry,
+				approvals: approvalStore,
+				memory:    newRemediationMemory(),
+				logger: slog.New(
+					slog.NewJSONHandler(&logOutput, nil),
+				),
+				now: func() time.Time { return observedAt },
+			}
+
+			agent.handlePodCrashLooping(ctx, alert)
+
+			if approvalStore.lookupCalls != 1 {
+				t.Fatalf(
+					"approval Lookup calls = %d; want 1",
+					approvalStore.lookupCalls,
+				)
+			}
+			if actions := kubernetesClient.Actions(); len(actions) != 0 {
+				t.Fatalf(
+					"Kubernetes actions = %#v; want none",
+					actions,
+				)
+			}
+			if !strings.Contains(
+				logOutput.String(),
+				`"error_code":"APPROVAL_CHECK_FAILED"`,
+			) {
+				t.Fatalf(
+					"missing approval failure log: %s",
+					logOutput.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestHandlePodCrashLoopingDoesNotActAfterClaimTakeover(
+	t *testing.T,
+) {
+	observedAt := time.Date(2026, 9, 29, 11, 0, 0, 0, time.UTC)
+	alert := Alert{
+		Labels: map[string]string{
+			"alertname": podCrashLoopingAlert,
+			"namespace": "default",
+			"pod":       "crash-app-takeover",
+		},
+		Annotations: map[string]string{
+			"description": "CrashLoopBackOff",
+		},
+		State:    "firing",
+		ActiveAt: observedAt,
+	}
+	podEvidence := PodEvidence{
+		Target: DecisionTarget{
+			Cluster:   "dev",
+			Namespace: "default",
+			Kind:      "Pod",
+			Name:      "crash-app-takeover",
+			UID:       "pod-uid-takeover",
+		},
+		Owner: OwnerEvidence{
+			Kind: "ReplicaSet",
+			Name: "crash-app-rs",
+			UID:  "rs-uid-takeover",
+		},
+	}
+
+	legacyIncidentID := incidentIDFor(
+		alert,
+		podEvidence.Target.UID,
+	)
+	decision := policyTestDecision(ActionRestartPod)
+	decision.IncidentID = legacyIncidentID
+	decision.Target = podEvidence.Target
+
+	ctx := context.Background()
+	registry := incident.NewMemoryRegistry()
+	lifecycleIncident, _, err := registry.Observe(
+		ctx,
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   "dev",
+			AlertName: alert.Labels["alertname"],
+			Target: incident.Target{
+				Kind:      podEvidence.Target.Kind,
+				Namespace: podEvidence.Target.Namespace,
+				Name:      podEvidence.Target.Name,
+				UID:       podEvidence.Target.UID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+
+	approvalStore := approval.NewMemoryStore()
+	mustGrantApproval(
+		t,
+		approvalStore,
+		lifecycleIncident.ID,
+		string(decision.Action),
+		podEvidence.Target,
+		observedAt,
+	)
+
+	stateStore := &takeoverRemediationStateStore{
+		delegate: newRemediationMemory(),
+		registry: registry,
+		command: incident.ClaimCommand{
+			IncidentID:      lifecycleIncident.ID,
+			ExpectedVersion: 3,
+			HolderID:        "agent-b",
+			Now:             observedAt.Add(31 * time.Second),
+			LeaseDuration:   30 * time.Second,
+		},
+	}
+
+	kubernetesClient := fake.NewSimpleClientset(
+		&v1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      podEvidence.Target.Name,
+				Namespace: podEvidence.Target.Namespace,
+				UID:       types.UID(podEvidence.Target.UID),
+			},
+		},
+	)
+	var logOutput bytes.Buffer
+
+	agent := &sreAgent{
+		config: agentConfig{
+			ClusterName:                "dev",
+			AllowedNamespaces:          []string{"default"},
+			AllowedControllerKinds:     []string{"ReplicaSet"},
+			RestartPodApproved:         true,
+			MinimumConfidence:          0.90,
+			RestartCooldown:            10 * time.Minute,
+			AttemptWindow:              time.Hour,
+			MaximumAttempts:            1,
+			OllamaTimeout:              time.Second,
+			KubernetesRequestTimeout:   time.Second,
+			IncidentClaimHolderID:      "agent-a",
+			IncidentClaimLeaseDuration: 30 * time.Second,
+		},
+		kubernetes: kubernetesClient,
+		collector:  &stubContextCollector{evidence: podEvidence},
+		ollama: &stubDecisionSource{
+			decision: decision,
+		},
+		incidents: registry,
+		approvals: approvalStore,
+		memory:    stateStore,
+		logger: slog.New(
+			slog.NewJSONHandler(&logOutput, nil),
+		),
+		now: func() time.Time { return observedAt },
+	}
+
+	agent.handlePodCrashLooping(ctx, alert)
+
+	if stateStore.takeoverErr != nil {
+		t.Fatalf(
+			"takeover Claim() error = %v; want nil",
+			stateStore.takeoverErr,
+		)
+	}
+	if actions := kubernetesClient.Actions(); len(actions) != 0 {
+		t.Fatalf(
+			"Kubernetes actions = %#v; want none after late claim takeover",
+			actions,
+		)
+	}
+	if !strings.Contains(
+		logOutput.String(),
+		`"error_code":"INCIDENT_ACTION_FENCE_FAILED"`,
+	) {
+		t.Fatalf(
+			"missing action fence failure log: %s",
+			logOutput.String(),
+		)
 	}
 }
 
@@ -293,7 +802,58 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateRecordFails(
 	decision := policyTestDecision(ActionRestartPod)
 	decision.IncidentID = incidentID
 	decision.Target = podEvidence.Target
+	incidentRegistry := incident.NewMemoryRegistry()
 
+	persistentIncident, _, err := incidentRegistry.Observe(
+		context.Background(),
+		incident.Observation{
+			Source:    "prometheus",
+			Cluster:   podEvidence.Target.Cluster,
+			AlertName: alert.Labels["alertname"],
+			Target: incident.Target{
+				Kind:      podEvidence.Target.Kind,
+				Namespace: podEvidence.Target.Namespace,
+				Name:      podEvidence.Target.Name,
+				UID:       podEvidence.Target.UID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+
+	plan, err := approval.NewPlan(
+		approval.PlanCommand{
+			IncidentID: persistentIncident.ID,
+			Action:     string(decision.Action),
+			Target: approval.Target{
+				Cluster:   podEvidence.Target.Cluster,
+				Namespace: podEvidence.Target.Namespace,
+				Kind:      podEvidence.Target.Kind,
+				Name:      podEvidence.Target.Name,
+				UID:       podEvidence.Target.UID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewPlan() error = %v", err)
+	}
+
+	approvalStore := approval.NewMemoryStore()
+	err = approvalStore.Grant(
+		context.Background(),
+		approval.Approval{
+			IncidentID: persistentIncident.ID,
+			PlanHash:   plan.Hash,
+			TargetUID:  podEvidence.Target.UID,
+			ApprovedBy: "test-approver",
+			ApprovedAt: observedAt.Add(-time.Minute),
+			ExpiresAt:  observedAt.Add(time.Hour),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Grant() error = %v", err)
+	}
 	kubernetesClient := fake.NewSimpleClientset(
 		&v1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -307,19 +867,22 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateRecordFails(
 	var logOutput bytes.Buffer
 	agent := &sreAgent{
 		config: agentConfig{
-			ClusterName:              "dev",
-			AllowedNamespaces:        []string{"default"},
-			AllowedControllerKinds:   []string{"ReplicaSet"},
-			RestartPodApproved:       true,
-			MinimumConfidence:        0.90,
-			RestartCooldown:          10 * time.Minute,
-			AttemptWindow:            time.Hour,
-			MaximumAttempts:          1,
-			OllamaTimeout:            time.Second,
-			KubernetesRequestTimeout: time.Second,
+			ClusterName:                "dev",
+			AllowedNamespaces:          []string{"default"},
+			AllowedControllerKinds:     []string{"ReplicaSet"},
+			RestartPodApproved:         true,
+			MinimumConfidence:          0.90,
+			RestartCooldown:            10 * time.Minute,
+			AttemptWindow:              time.Hour,
+			MaximumAttempts:            1,
+			IncidentClaimHolderID:      "sre-agent-v2-record-failure-test",
+			IncidentClaimLeaseDuration: 30 * time.Second,
+			OllamaTimeout:              time.Second,
+			KubernetesRequestTimeout:   time.Second,
 		},
 		kubernetes: kubernetesClient,
-		incidents:  incident.NewMemoryRegistry(),
+		incidents:  incidentRegistry,
+		approvals:  approvalStore,
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
@@ -479,6 +1042,7 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 		config,
 		fake.NewSimpleClientset(),
 		incident.NewMemoryRegistry(),
+		approval.NewMemoryStore(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func() {},
 		readiness.markSuccessfulCycle,
@@ -535,6 +1099,7 @@ func TestRunCycleMarksLivenessProgressWhenPrometheusQueryFails(t *testing.T) {
 		},
 		incidents: incident.NewMemoryRegistry(),
 		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+
 		now: func() time.Time {
 			return currentTime
 		},
@@ -590,6 +1155,7 @@ func TestNewSREAgentConnectsCycleProgressToLiveness(t *testing.T) {
 		config,
 		fake.NewSimpleClientset(),
 		incident.NewMemoryRegistry(),
+		approval.NewMemoryStore(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		liveness.markProgress,
 		func() {},
@@ -1064,6 +1630,7 @@ func TestNewSREAgentConnectsCycleResultRecorder(t *testing.T) {
 		config,
 		fake.NewSimpleClientset(),
 		incident.NewMemoryRegistry(),
+		approval.NewMemoryStore(),
 		slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1109,6 +1676,7 @@ func TestNewSREAgentUsesConfiguredConfigMapRemediationState(t *testing.T) {
 		config,
 		kubernetesClient,
 		incident.NewMemoryRegistry(),
+		approval.NewMemoryStore(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
 		nil,
@@ -1389,6 +1957,7 @@ func TestNewSREAgentConnectsProvidedIncidentRegistry(t *testing.T) {
 		},
 		fake.NewSimpleClientset(),
 		lifecycleRegistry,
+		approval.NewMemoryStore(),
 		slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1931,4 +2500,108 @@ func (*trackingRemediationStateStore) Record(
 	remediationStateRecord,
 ) error {
 	return nil
+}
+func mustGrantApproval(
+	t *testing.T,
+	store approval.Store,
+	incidentID string,
+	action string,
+	target DecisionTarget,
+	now time.Time,
+) {
+	t.Helper()
+
+	plan, err := approval.NewPlan(
+		approval.PlanCommand{
+			IncidentID: incidentID,
+			Action:     action,
+			Target: approval.Target{
+				Cluster:   target.Cluster,
+				Namespace: target.Namespace,
+				Kind:      target.Kind,
+				Name:      target.Name,
+				UID:       target.UID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewPlan() error = %v", err)
+	}
+
+	err = store.Grant(
+		context.Background(),
+		approval.Approval{
+			IncidentID: plan.IncidentID,
+			PlanHash:   plan.Hash,
+			TargetUID:  plan.Target.UID,
+			ApprovedBy: "operator-a",
+			ApprovedAt: now.Add(-time.Minute),
+			ExpiresAt:  now.Add(time.Hour),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Grant() error = %v", err)
+	}
+}
+
+type takeoverRemediationStateStore struct {
+	delegate    remediationStateStore
+	registry    *incident.Registry
+	command     incident.ClaimCommand
+	takeoverErr error
+}
+
+func (store *takeoverRemediationStateStore) Snapshot(
+	ctx context.Context,
+	query remediationStateQuery,
+) (remediationSnapshot, error) {
+	return store.delegate.Snapshot(ctx, query)
+}
+
+func (store *takeoverRemediationStateStore) Record(
+	ctx context.Context,
+	record remediationStateRecord,
+) error {
+	if err := store.delegate.Record(ctx, record); err != nil {
+		return err
+	}
+	if record.Kind != remediationStateRecordActionAttempted {
+		return nil
+	}
+
+	_, store.takeoverErr = store.registry.Claim(
+		ctx,
+		store.command,
+	)
+	return store.takeoverErr
+}
+
+type staticApprovalStore struct {
+	granted     approval.Approval
+	lookupErr   error
+	lookupCalls int
+}
+
+func (*staticApprovalStore) Grant(
+	context.Context,
+	approval.Approval,
+) error {
+	return errors.New("Grant is not supported by this test store")
+}
+
+func (store *staticApprovalStore) Lookup(
+	ctx context.Context,
+	approvalKey approval.ApprovalKey,
+) (approval.Approval, error) {
+	if err := ctx.Err(); err != nil {
+		return approval.Approval{}, err
+	}
+
+	store.lookupCalls++
+
+	if store.lookupErr != nil {
+		return approval.Approval{}, store.lookupErr
+	}
+
+	return store.granted, nil
 }

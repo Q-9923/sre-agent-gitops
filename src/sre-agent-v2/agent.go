@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
-	"log/slog"
-	"net/http"
-	"time"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/kubernetes"
+	"log/slog"
+	"net/http"
+	approvaldomain "sre-agent/internal/approval"
 	"sre-agent/internal/incident"
+	"time"
 )
 
 const podCrashLoopingAlert = "PodCrashLooping"
@@ -35,6 +36,7 @@ type sreAgent struct {
 	ollama              decisionSource
 	incidents           incidentRegistry
 	memory              remediationStateStore
+	approvals           approvaldomain.Store
 	logger              *slog.Logger
 	now                 func() time.Time
 	markCycleProgress   func()
@@ -46,6 +48,7 @@ func newSREAgent(
 	config agentConfig,
 	kubernetesClient kubernetes.Interface,
 	incidents incidentRegistry,
+	approvals approvaldomain.Store,
 	logger *slog.Logger,
 	markCycleProgress func(),
 	markSuccessfulCycle func(),
@@ -55,9 +58,17 @@ func newSREAgent(
 		config:     config,
 		kubernetes: kubernetesClient,
 		incidents:  incidents,
+		approvals:  approvals,
 		collector:  newKubernetesContextCollector(kubernetesClient),
-		prometheus: newPrometheusClient(config.PrometheusURL, &http.Client{Timeout: config.PrometheusTimeout}),
-		ollama:     newOllamaClient(config.OllamaURL, config.OllamaModel, &http.Client{Timeout: config.OllamaTimeout}),
+		prometheus: newPrometheusClient(
+			config.PrometheusURL,
+			&http.Client{Timeout: config.PrometheusTimeout},
+		),
+		ollama: newOllamaClient(
+			config.OllamaURL,
+			config.OllamaModel,
+			&http.Client{Timeout: config.OllamaTimeout},
+		),
 		memory: newConfigMapRemediationState(
 			kubernetesClient,
 			config.RemediationStateNamespace,
@@ -70,7 +81,6 @@ func newSREAgent(
 		recordCycleResult:   recordCycleResult,
 	}
 }
-
 func (agent *sreAgent) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		agent.logger.Info(
@@ -185,6 +195,71 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 	}
 }
 
+func (agent *sreAgent) storedApprovalGranted(
+	ctx context.Context,
+	incidentID string,
+	action string,
+	target DecisionTarget,
+	now time.Time,
+) (bool, error) {
+	if !agent.config.RestartPodApproved {
+		return false, nil
+	}
+	if agent.approvals == nil {
+		return false, errors.New("approval store is not configured")
+	}
+
+	plan, err := approvaldomain.NewPlan(
+		approvaldomain.PlanCommand{
+			IncidentID: incidentID,
+			Action:     action,
+			Target: approvaldomain.Target{
+				Cluster:   target.Cluster,
+				Namespace: target.Namespace,
+				Kind:      target.Kind,
+				Name:      target.Name,
+				UID:       target.UID,
+			},
+		},
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"create canonical remediation plan: %w",
+			err,
+		)
+	}
+
+	granted, err := agent.approvals.Lookup(
+		ctx,
+		approvaldomain.ApprovalKey{
+			IncidentID: plan.IncidentID,
+			PlanHash:   plan.Hash,
+			TargetUID:  plan.Target.UID,
+		},
+	)
+	if errors.Is(err, approvaldomain.ErrApprovalNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf(
+			"lookup remediation approval: %w",
+			err,
+		)
+	}
+
+	if err := approvaldomain.Validate(
+		granted,
+		plan,
+		now,
+	); err != nil {
+		return false, fmt.Errorf(
+			"validate remediation approval: %w",
+			err,
+		)
+	}
+
+	return true, nil
+}
 func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	namespace := alert.Labels["namespace"]
 	podName := alert.Labels["pod"]
@@ -258,7 +333,7 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		agent.config.IncidentClaimHolderID != "" &&
 			agent.config.IncidentClaimLeaseDuration > 0
 
-	var claimedIncident incident.Incident
+	currentIncident := observedIncident
 
 	if claimEnabled {
 		claimStartedAt := agent.now()
@@ -292,7 +367,7 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			return
 		}
 
-		claimedIncident = claim.Incident
+		currentIncident = claim.Incident
 	}
 	targetKey := remediationTargetKey(podEvidence)
 	now := agent.now()
@@ -363,11 +438,11 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 
 	if claimEnabled {
 		transitionStartedAt := agent.now()
-		_, transitionErr := agent.incidents.Transition(
+		transitionedIncident, transitionErr := agent.incidents.Transition(
 			ctx,
 			incident.TransitionCommand{
-				IncidentID:      claimedIncident.ID,
-				ExpectedVersion: claimedIncident.Version,
+				IncidentID:      currentIncident.ID,
+				ExpectedVersion: currentIncident.Version,
 				To:              incident.StateDiagnosed,
 				Actor:           agent.config.IncidentClaimHolderID,
 				ReasonCode:      "DIAGNOSIS_COMPLETED",
@@ -384,7 +459,7 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 
 			agent.logger.Warn(
 				"incident_transition_failed",
-				"incident_id", claimedIncident.ID,
+				"incident_id", currentIncident.ID,
 				"action", "DIAGNOSE_INCIDENT",
 				"target", targetLabel,
 				"result", "NO_ACTION",
@@ -394,6 +469,34 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			)
 			return
 		}
+		currentIncident = transitionedIncident
+	}
+	approvalCheckStartedAt := agent.now()
+
+	approvalGranted, approvalErr := agent.storedApprovalGranted(
+		ctx,
+		observedIncident.ID,
+		string(decision.Action),
+		podEvidence.Target,
+		agent.now(),
+	)
+	approvalCheckDuration := agent.now().Sub(approvalCheckStartedAt)
+	if approvalErr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
+		agent.logger.Warn(
+			"approval_check_failed",
+			"incident_id", observedIncident.ID,
+			"action", decision.Action,
+			"target", targetLabel,
+			"result", "NO_ACTION",
+			"error_code", "APPROVAL_CHECK_FAILED",
+			"duration_ms", approvalCheckDuration.Milliseconds(),
+			"error", approvalErr,
+		)
+		return
 	}
 
 	policyResult := EvaluateDecision(decision, PolicyContext{
@@ -402,7 +505,7 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		AllowedNamespaces:      agent.config.AllowedNamespaces,
 		ControllerOwnerKind:    podEvidence.Owner.Kind,
 		AllowedControllerKinds: agent.config.AllowedControllerKinds,
-		ApprovalGranted:        agent.config.RestartPodApproved,
+		ApprovalGranted:        approvalGranted,
 		MinimumConfidence:      agent.config.MinimumConfidence,
 		Duplicate:              remediationState.Duplicate,
 		InCooldown:             remediationState.InCooldown,
@@ -451,6 +554,19 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		return
 	}
 
+	if !claimEnabled {
+		agent.logger.Warn(
+			"incident_action_fence_failed",
+			"incident_id", currentIncident.ID,
+			"action", decision.Action,
+			"target", targetLabel,
+			"result", "NO_ACTION",
+			"duration_ms", int64(0),
+			"error_code", "INCIDENT_ACTION_FENCE_UNAVAILABLE",
+		)
+		return
+	}
+
 	// Count the authorized attempt before calling Kubernetes. A timeout or
 	// ambiguous network result must not trigger an immediate second deletion.
 
@@ -477,6 +593,37 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			"result", "ERROR",
 			"error_code", "REMEDIATION_STATE_RECORD_FAILED",
 			"error", err,
+		)
+		return
+	}
+
+	actionFenceStartedAt := agent.now()
+	_, actionFenceErr := agent.incidents.Claim(
+		ctx,
+		incident.ClaimCommand{
+			IncidentID:      currentIncident.ID,
+			ExpectedVersion: currentIncident.Version,
+			HolderID:        agent.config.IncidentClaimHolderID,
+			Now:             agent.now(),
+			LeaseDuration:   agent.config.IncidentClaimLeaseDuration,
+		},
+	)
+	actionFenceDuration := agent.now().Sub(actionFenceStartedAt)
+
+	if actionFenceErr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+
+		agent.logger.Warn(
+			"incident_action_fence_failed",
+			"incident_id", currentIncident.ID,
+			"action", decision.Action,
+			"target", targetLabel,
+			"result", "NO_ACTION",
+			"duration_ms", actionFenceDuration.Milliseconds(),
+			"error_code", "INCIDENT_ACTION_FENCE_FAILED",
+			"error", actionFenceErr,
 		)
 		return
 	}
