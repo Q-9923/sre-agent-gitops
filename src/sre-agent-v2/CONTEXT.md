@@ -52,3 +52,11 @@ _Avoid_: Active Claim, Approval
 
 **Verification**:
 独立判断修复后目标是否恢复的结果。
+
+**Waiting Approval**:
+Incident 已形成确定的候选 Plan，但尚未取得与该 Plan 和目标资源身份完全匹配的有效 Approval；该 Incident 仍保持活跃并可在后续恢复处理。
+_Avoid_: Handled, Resolved
+
+**Approval Binding**:
+Incident 等待审批时保存的 Plan 身份与目标资源身份组合，用于确保后续 Approval 只能授权同一个候选方案和同一个资源实例。
+_Avoid_: Approval, Active Claim

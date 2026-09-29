@@ -1210,3 +1210,295 @@ func TestRegistryTransitionRejectsStaleClaimVersionAfterLeaseTakeover(
 		)
 	}
 }
+func TestRegistryTransitionBindsApprovalAndKeepsIncidentActive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+	observation := waitingApprovalTestObservation(
+		"pod-uid-waiting-approval",
+	)
+
+	diagnosed := observeDiagnosedIncidentForApprovalTest(
+		t,
+		registry,
+		observation,
+	)
+
+	const (
+		planHash  = "a2f50b614b76121f9547762fe28deba170246779442073099f18b25ca9cf87c5"
+		targetUID = "pod-uid-waiting-approval"
+	)
+
+	waiting, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              StateWaitingApproval,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: ApprovalBinding{
+				PlanHash:  planHash,
+				TargetUID: targetUID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Transition(WAITING_APPROVAL) error = %v", err)
+	}
+
+	if waiting.State != StateWaitingApproval {
+		t.Fatalf(
+			"waiting State = %q; want %q",
+			waiting.State,
+			StateWaitingApproval,
+		)
+	}
+	if waiting.Version != 3 {
+		t.Fatalf(
+			"waiting Version = %d; want 3",
+			waiting.Version,
+		)
+	}
+	if waiting.ApprovalBinding.PlanHash != planHash {
+		t.Fatalf(
+			"waiting PlanHash = %q; want %q",
+			waiting.ApprovalBinding.PlanHash,
+			planHash,
+		)
+	}
+	if waiting.ApprovalBinding.TargetUID != targetUID {
+		t.Fatalf(
+			"waiting TargetUID = %q; want %q",
+			waiting.ApprovalBinding.TargetUID,
+			targetUID,
+		)
+	}
+
+	observedAgain, createdAgain, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("second Observe() error = %v", err)
+	}
+	if createdAgain {
+		t.Fatal(
+			"second Observe() created = true; want false while approval is pending",
+		)
+	}
+	if observedAgain.ID != waiting.ID {
+		t.Fatalf(
+			"second Observe() ID = %q; want %q",
+			observedAgain.ID,
+			waiting.ID,
+		)
+	}
+	if observedAgain.State != StateWaitingApproval {
+		t.Fatalf(
+			"second Observe() State = %q; want %q",
+			observedAgain.State,
+			StateWaitingApproval,
+		)
+	}
+	if observedAgain.ApprovalBinding != waiting.ApprovalBinding {
+		t.Fatalf(
+			"second Observe() ApprovalBinding = %#v; want %#v",
+			observedAgain.ApprovalBinding,
+			waiting.ApprovalBinding,
+		)
+	}
+}
+
+func TestRegistryTransitionRejectsIncompleteApprovalBinding(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		binding ApprovalBinding
+	}{
+		{
+			name: "missing plan hash",
+			binding: ApprovalBinding{
+				TargetUID: "pod-uid-missing-plan",
+			},
+		},
+		{
+			name: "missing target UID",
+			binding: ApprovalBinding{
+				PlanHash: "a2f50b614b76121f9547762fe28deba170246779442073099f18b25ca9cf87c5",
+			},
+		},
+		{
+			name:    "empty binding",
+			binding: ApprovalBinding{},
+		},
+	}
+
+	for _, testCase := range testCases {
+		testCase := testCase
+
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			registry := NewMemoryRegistry()
+			observation := waitingApprovalTestObservation(
+				"pod-uid-" + testCase.name,
+			)
+			diagnosed := observeDiagnosedIncidentForApprovalTest(
+				t,
+				registry,
+				observation,
+			)
+
+			_, err := registry.Transition(
+				context.Background(),
+				TransitionCommand{
+					IncidentID:      diagnosed.ID,
+					ExpectedVersion: diagnosed.Version,
+					To:              StateWaitingApproval,
+					Actor:           "sre-agent-v2",
+					ReasonCode:      "APPROVAL_REQUIRED",
+					ApprovalBinding: testCase.binding,
+				},
+			)
+			if !errors.Is(err, ErrInvalidTransition) {
+				t.Fatalf(
+					"Transition(WAITING_APPROVAL) error = %v; want ErrInvalidTransition",
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestRegistryTransitionRejectsWaitingApprovalBeforeDiagnosis(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	ctx := context.Background()
+	observation := waitingApprovalTestObservation(
+		"pod-uid-not-diagnosed",
+	)
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	_, err = registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              StateWaitingApproval,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: ApprovalBinding{
+				PlanHash:  "a2f50b614b76121f9547762fe28deba170246779442073099f18b25ca9cf87c5",
+				TargetUID: observation.Target.UID,
+			},
+		},
+	)
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf(
+			"DETECTED -> WAITING_APPROVAL error = %v; want ErrInvalidTransition",
+			err,
+		)
+	}
+}
+
+func TestRegistryTransitionRejectsApprovalBindingOutsideWaitingApproval(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	registry := NewMemoryRegistry()
+	observation := waitingApprovalTestObservation(
+		"pod-uid-binding-on-resolution",
+	)
+	diagnosed := observeDiagnosedIncidentForApprovalTest(
+		t,
+		registry,
+		observation,
+	)
+
+	_, err := registry.Transition(
+		context.Background(),
+		TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              StateResolved,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "INCIDENT_RESOLVED",
+			ApprovalBinding: ApprovalBinding{
+				PlanHash:  "a2f50b614b76121f9547762fe28deba170246779442073099f18b25ca9cf87c5",
+				TargetUID: observation.Target.UID,
+			},
+		},
+	)
+	if !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf(
+			"Transition(RESOLVED) with approval binding error = %v; want ErrInvalidTransition",
+			err,
+		)
+	}
+}
+
+func waitingApprovalTestObservation(targetUID string) Observation {
+	return Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-waiting-approval",
+			UID:       targetUID,
+		},
+	}
+}
+
+func observeDiagnosedIncidentForApprovalTest(
+	t *testing.T,
+	registry *Registry,
+	observation Observation,
+) Incident {
+	t.Helper()
+
+	ctx := context.Background()
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              StateDiagnosed,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Transition(DIAGNOSED) error = %v", err)
+	}
+
+	return diagnosed
+}

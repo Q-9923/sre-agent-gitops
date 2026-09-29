@@ -1439,3 +1439,436 @@ func TestRegistryTransitionRejectsStaleClaimVersionAfterLeaseTakeover(
 		)
 	}
 }
+
+func TestRegistryTransitionPersistsWaitingApprovalAcrossAdapterRestart(
+	t *testing.T,
+) {
+	ctx, pool, registry := newPostgresTestRegistry(t)
+
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-waiting-approval",
+			UID:       "pod-uid-postgres-waiting-approval",
+		},
+	}
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Transition(DIAGNOSED) error = %v; want nil", err)
+	}
+
+	const (
+		planHash  = "a2f50b614b76121f9547762fe28deba170246779442073099f18b25ca9cf87c5"
+		targetUID = "pod-uid-postgres-waiting-approval"
+	)
+
+	waiting, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              incident.StateWaitingApproval,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: incident.ApprovalBinding{
+				PlanHash:  planHash,
+				TargetUID: targetUID,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(WAITING_APPROVAL) error = %v; want nil",
+			err,
+		)
+	}
+
+	if waiting.State != incident.StateWaitingApproval {
+		t.Fatalf(
+			"waiting State = %q; want %q",
+			waiting.State,
+			incident.StateWaitingApproval,
+		)
+	}
+	if waiting.Version != diagnosed.Version+1 {
+		t.Fatalf(
+			"waiting Version = %d; want %d",
+			waiting.Version,
+			diagnosed.Version+1,
+		)
+	}
+	if waiting.ApprovalBinding.PlanHash != planHash {
+		t.Fatalf(
+			"waiting PlanHash = %q; want %q",
+			waiting.ApprovalBinding.PlanHash,
+			planHash,
+		)
+	}
+	if waiting.ApprovalBinding.TargetUID != targetUID {
+		t.Fatalf(
+			"waiting TargetUID = %q; want %q",
+			waiting.ApprovalBinding.TargetUID,
+			targetUID,
+		)
+	}
+
+	var (
+		persistedState     string
+		persistedVersion   int64
+		persistedPlanHash  string
+		persistedTargetUID string
+		resolvedAtIsNull   bool
+		auditFromState     string
+		auditToState       string
+		auditActor         string
+		auditReasonCode    string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`
+SELECT
+    incidents.state,
+    incidents.version,
+    incidents.approval_plan_hash,
+    incidents.approval_target_uid,
+    incidents.resolved_at IS NULL,
+    transitions.from_state,
+    transitions.to_state,
+    transitions.actor,
+    transitions.reason_code
+FROM incidents
+JOIN incident_transitions AS transitions
+  ON transitions.incident_id = incidents.id
+ AND transitions.version = incidents.version
+WHERE incidents.id = $1
+`,
+		waiting.ID,
+	).Scan(
+		&persistedState,
+		&persistedVersion,
+		&persistedPlanHash,
+		&persistedTargetUID,
+		&resolvedAtIsNull,
+		&auditFromState,
+		&auditToState,
+		&auditActor,
+		&auditReasonCode,
+	)
+	if err != nil {
+		t.Fatalf(
+			"query persisted waiting approval incident error = %v",
+			err,
+		)
+	}
+
+	if persistedState != string(incident.StateWaitingApproval) {
+		t.Fatalf(
+			"persisted State = %q; want %q",
+			persistedState,
+			incident.StateWaitingApproval,
+		)
+	}
+	if persistedVersion != int64(waiting.Version) {
+		t.Fatalf(
+			"persisted Version = %d; want %d",
+			persistedVersion,
+			waiting.Version,
+		)
+	}
+	if persistedPlanHash != planHash {
+		t.Fatalf(
+			"persisted PlanHash = %q; want %q",
+			persistedPlanHash,
+			planHash,
+		)
+	}
+	if persistedTargetUID != targetUID {
+		t.Fatalf(
+			"persisted TargetUID = %q; want %q",
+			persistedTargetUID,
+			targetUID,
+		)
+	}
+	if !resolvedAtIsNull {
+		t.Fatal(
+			"persisted resolved_at is not NULL while approval is pending",
+		)
+	}
+	if auditFromState != string(incident.StateDiagnosed) {
+		t.Fatalf(
+			"audit from_state = %q; want %q",
+			auditFromState,
+			incident.StateDiagnosed,
+		)
+	}
+	if auditToState != string(incident.StateWaitingApproval) {
+		t.Fatalf(
+			"audit to_state = %q; want %q",
+			auditToState,
+			incident.StateWaitingApproval,
+		)
+	}
+	if auditActor != "sre-agent-v2" {
+		t.Fatalf(
+			"audit actor = %q; want %q",
+			auditActor,
+			"sre-agent-v2",
+		)
+	}
+	if auditReasonCode != "APPROVAL_REQUIRED" {
+		t.Fatalf(
+			"audit reason_code = %q; want %q",
+			auditReasonCode,
+			"APPROVAL_REQUIRED",
+		)
+	}
+
+	restartedRegistry := NewRegistry(pool)
+
+	recovered, recoveredCreated, err := restartedRegistry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Observe() after adapter restart error = %v",
+			err,
+		)
+	}
+	if recoveredCreated {
+		t.Fatal(
+			"Observe() after adapter restart created a duplicate Incident",
+		)
+	}
+	if recovered.ID != waiting.ID {
+		t.Fatalf(
+			"recovered Incident ID = %q; want %q",
+			recovered.ID,
+			waiting.ID,
+		)
+	}
+	if recovered.State != incident.StateWaitingApproval {
+		t.Fatalf(
+			"recovered State = %q; want %q",
+			recovered.State,
+			incident.StateWaitingApproval,
+		)
+	}
+	if recovered.Version != waiting.Version {
+		t.Fatalf(
+			"recovered Version = %d; want %d",
+			recovered.Version,
+			waiting.Version,
+		)
+	}
+	if recovered.ApprovalBinding != waiting.ApprovalBinding {
+		t.Fatalf(
+			"recovered ApprovalBinding = %#v; want %#v",
+			recovered.ApprovalBinding,
+			waiting.ApprovalBinding,
+		)
+	}
+}
+
+func TestRegistryTransitionWaitingApprovalRollsBackWhenAuditInsertFails(
+	t *testing.T,
+) {
+	ctx, pool, registry := newPostgresTestRegistry(t)
+
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-waiting-approval-rollback",
+			UID:       "pod-uid-waiting-approval-rollback",
+		},
+	}
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Transition(DIAGNOSED) error = %v; want nil", err)
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		`
+ALTER TABLE incident_transitions
+ADD CONSTRAINT incident_transitions_reject_waiting_approval_test
+CHECK (to_state <> 'WAITING_APPROVAL')
+`,
+	)
+	if err != nil {
+		t.Fatalf("install failing audit constraint: %v", err)
+	}
+
+	_, err = registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              incident.StateWaitingApproval,
+			Actor:           "sre-agent-v2",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: incident.ApprovalBinding{
+				PlanHash:  "f8c1e13645e14ce2754097dc585f649823f6592763ba03a2f7d4fa3ed82148bc",
+				TargetUID: observation.Target.UID,
+			},
+		},
+	)
+	if err == nil {
+		t.Fatal(
+			"Transition(WAITING_APPROVAL) error = nil; want audit failure",
+		)
+	}
+
+	var (
+		persistedState    string
+		persistedVersion  int64
+		planHashIsNull    bool
+		targetUIDIsNull   bool
+		waitingAuditCount int
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`
+SELECT
+    state,
+    version,
+    approval_plan_hash IS NULL,
+    approval_target_uid IS NULL
+FROM incidents
+WHERE id = $1
+`,
+		diagnosed.ID,
+	).Scan(
+		&persistedState,
+		&persistedVersion,
+		&planHashIsNull,
+		&targetUIDIsNull,
+	)
+	if err != nil {
+		t.Fatalf("query rolled back Incident error = %v", err)
+	}
+
+	if persistedState != string(incident.StateDiagnosed) {
+		t.Fatalf(
+			"persisted State = %q; want %q after rollback",
+			persistedState,
+			incident.StateDiagnosed,
+		)
+	}
+	if persistedVersion != int64(diagnosed.Version) {
+		t.Fatalf(
+			"persisted Version = %d; want %d after rollback",
+			persistedVersion,
+			diagnosed.Version,
+		)
+	}
+	if !planHashIsNull {
+		t.Fatal(
+			"approval_plan_hash is not NULL after transaction rollback",
+		)
+	}
+	if !targetUIDIsNull {
+		t.Fatal(
+			"approval_target_uid is not NULL after transaction rollback",
+		)
+	}
+
+	err = pool.QueryRow(
+		ctx,
+		`
+SELECT count(*)
+FROM incident_transitions
+WHERE incident_id = $1
+  AND to_state = 'WAITING_APPROVAL'
+`,
+		diagnosed.ID,
+	).Scan(&waitingAuditCount)
+	if err != nil {
+		t.Fatalf("count waiting approval audit records: %v", err)
+	}
+	if waitingAuditCount != 0 {
+		t.Fatalf(
+			"waiting approval audit count = %d; want 0",
+			waitingAuditCount,
+		)
+	}
+
+	recovered, recoveredCreated, err := NewRegistry(pool).Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("Observe() after rollback error = %v", err)
+	}
+	if recoveredCreated {
+		t.Fatal(
+			"Observe() after rollback created a duplicate Incident",
+		)
+	}
+	if recovered.State != incident.StateDiagnosed {
+		t.Fatalf(
+			"recovered State = %q; want %q",
+			recovered.State,
+			incident.StateDiagnosed,
+		)
+	}
+	if recovered.Version != diagnosed.Version {
+		t.Fatalf(
+			"recovered Version = %d; want %d",
+			recovered.Version,
+			diagnosed.Version,
+		)
+	}
+	if recovered.ApprovalBinding != (incident.ApprovalBinding{}) {
+		t.Fatalf(
+			"recovered ApprovalBinding = %#v; want empty",
+			recovered.ApprovalBinding,
+		)
+	}
+}

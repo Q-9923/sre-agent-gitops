@@ -13,9 +13,10 @@ import (
 type State string
 
 const (
-	StateDetected  State = "DETECTED"
-	StateDiagnosed State = "DIAGNOSED"
-	StateResolved  State = "RESOLVED"
+	StateDetected        State = "DETECTED"
+	StateDiagnosed       State = "DIAGNOSED"
+	StateWaitingApproval State = "WAITING_APPROVAL"
+	StateResolved        State = "RESOLVED"
 )
 
 var (
@@ -40,10 +41,16 @@ type Observation struct {
 	Target    Target
 }
 
+type ApprovalBinding struct {
+	PlanHash  string
+	TargetUID string
+}
+
 type Incident struct {
-	ID      string
-	State   State
-	Version uint64
+	ID              string
+	State           State
+	Version         uint64
+	ApprovalBinding ApprovalBinding
 
 	idempotencyKey string
 }
@@ -54,6 +61,7 @@ type TransitionCommand struct {
 	To              State
 	Actor           string
 	ReasonCode      string
+	ApprovalBinding ApprovalBinding
 }
 
 type ClaimCommand struct {
@@ -287,10 +295,11 @@ func (registry *Registry) Transition(
 	if err := command.Validate(); err != nil {
 		return Incident{}, err
 	}
+
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 
-	incident, exists := registry.incidentsByID[command.IncidentID]
+	current, exists := registry.incidentsByID[command.IncidentID]
 	if !exists {
 		return Incident{}, fmt.Errorf(
 			"incident %q was not found",
@@ -298,41 +307,50 @@ func (registry *Registry) Transition(
 		)
 	}
 
-	if incident.Version != command.ExpectedVersion {
+	if current.Version != command.ExpectedVersion {
 		return Incident{}, fmt.Errorf(
 			"%w: incident %q current=%d expected=%d",
 			ErrVersionConflict,
-			incident.ID,
-			incident.Version,
+			current.ID,
+			current.Version,
 			command.ExpectedVersion,
 		)
 	}
-	validTransition := (incident.State == StateDetected &&
+
+	validTransition := (current.State == StateDetected &&
 		(command.To == StateDiagnosed ||
 			command.To == StateResolved)) ||
-		(incident.State == StateDiagnosed &&
-			command.To == StateResolved)
+		(current.State == StateDiagnosed &&
+			(command.To == StateWaitingApproval ||
+				command.To == StateResolved))
 	if !validTransition {
 		return Incident{}, fmt.Errorf(
 			"%w: from %q to %q",
 			ErrInvalidTransition,
-			incident.State,
+			current.State,
 			command.To,
 		)
 	}
-	incident.State = command.To
-	incident.Version++
 
-	registry.incidentsByID[incident.ID] = incident
-	if incident.State == StateResolved {
+	current.State = command.To
+	current.Version++
+
+	if command.To == StateWaitingApproval {
+		current.ApprovalBinding = command.ApprovalBinding
+	}
+
+	registry.incidentsByID[current.ID] = current
+
+	if current.State == StateResolved {
 		delete(
 			registry.activeByKey,
-			incident.idempotencyKey,
+			current.idempotencyKey,
 		)
 	}
 
-	return incident, nil
+	return current, nil
 }
+
 func (command TransitionCommand) Validate() error {
 	if strings.TrimSpace(command.Actor) == "" {
 		return fmt.Errorf(
@@ -348,8 +366,34 @@ func (command TransitionCommand) Validate() error {
 		)
 	}
 
+	if command.To == StateWaitingApproval {
+		if strings.TrimSpace(command.ApprovalBinding.PlanHash) == "" {
+			return fmt.Errorf(
+				"%w: approval plan hash is required",
+				ErrInvalidTransition,
+			)
+		}
+
+		if strings.TrimSpace(command.ApprovalBinding.TargetUID) == "" {
+			return fmt.Errorf(
+				"%w: approval target UID is required",
+				ErrInvalidTransition,
+			)
+		}
+
+		return nil
+	}
+
+	if command.ApprovalBinding != (ApprovalBinding{}) {
+		return fmt.Errorf(
+			"%w: approval binding is only allowed for WAITING_APPROVAL",
+			ErrInvalidTransition,
+		)
+	}
+
 	return nil
 }
+
 func idempotencyKeyFor(observation Observation) string {
 	input := fmt.Sprintf(
 		"%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s",

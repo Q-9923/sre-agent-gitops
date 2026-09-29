@@ -64,14 +64,18 @@ RETURNING
     id,
     state,
     version,
+    COALESCE(approval_plan_hash, ''),
+    COALESCE(approval_target_uid, ''),
     id = $1
 `
 
 	var (
-		result  incident.Incident
-		state   string
-		version int64
-		created bool
+		result            incident.Incident
+		state             string
+		version           int64
+		approvalPlanHash  string
+		approvalTargetUID string
+		created           bool
 	)
 
 	err = registry.pool.QueryRow(
@@ -90,6 +94,8 @@ RETURNING
 		&result.ID,
 		&state,
 		&version,
+		&approvalPlanHash,
+		&approvalTargetUID,
 		&created,
 	)
 	if err != nil {
@@ -108,6 +114,10 @@ RETURNING
 
 	result.State = incident.State(state)
 	result.Version = uint64(version)
+	result.ApprovalBinding = incident.ApprovalBinding{
+		PlanHash:  approvalPlanHash,
+		TargetUID: approvalTargetUID,
+	}
 
 	return result, created, nil
 }
@@ -435,6 +445,16 @@ SET
         WHEN $1 = 'RESOLVED'
             THEN statement_timestamp()
         ELSE NULL
+    END,
+    approval_plan_hash = CASE
+        WHEN $1 = 'WAITING_APPROVAL'
+            THEN $4
+        ELSE NULL
+    END,
+    approval_target_uid = CASE
+        WHEN $1 = 'WAITING_APPROVAL'
+            THEN $5
+        ELSE NULL
     END
 FROM current
 WHERE updated.id = current.id
@@ -446,20 +466,25 @@ WHERE updated.id = current.id
       OR
       (
           current.state = 'DIAGNOSED'
-          AND $1 = 'RESOLVED'
+          AND $1 IN ('WAITING_APPROVAL', 'RESOLVED')
       )
   )
 RETURNING
     updated.id,
     updated.state,
     updated.version,
+    COALESCE(updated.approval_plan_hash, ''),
+    COALESCE(updated.approval_target_uid, ''),
     current.state
 `
+
 	var (
-		result    incident.Incident
-		state     string
-		fromState string
-		version   int64
+		result            incident.Incident
+		state             string
+		fromState         string
+		version           int64
+		approvalPlanHash  string
+		approvalTargetUID string
 	)
 
 	err = transaction.QueryRow(
@@ -468,10 +493,14 @@ RETURNING
 		string(command.To),
 		command.IncidentID,
 		command.ExpectedVersion,
+		command.ApprovalBinding.PlanHash,
+		command.ApprovalBinding.TargetUID,
 	).Scan(
 		&result.ID,
 		&state,
 		&version,
+		&approvalPlanHash,
+		&approvalTargetUID,
 		&fromState,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -533,6 +562,10 @@ VALUES ($1, $2, $3, $4, $5, $6)
 
 	result.State = incident.State(state)
 	result.Version = uint64(version)
+	result.ApprovalBinding = incident.ApprovalBinding{
+		PlanHash:  approvalPlanHash,
+		TargetUID: approvalTargetUID,
+	}
 
 	return result, nil
 }
