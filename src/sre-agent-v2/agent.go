@@ -195,18 +195,31 @@ func (agent *sreAgent) runCycle(ctx context.Context) {
 	}
 }
 
-func (agent *sreAgent) storedApprovalGranted(
+type storedApprovalStatus uint8
+
+const (
+	storedApprovalDisabled storedApprovalStatus = iota
+	storedApprovalGranted
+	storedApprovalWaiting
+)
+
+type storedApprovalCheck struct {
+	Status storedApprovalStatus
+	Plan   approvaldomain.Plan
+}
+
+func (agent *sreAgent) checkStoredApproval(
 	ctx context.Context,
 	incidentID string,
 	action string,
 	target DecisionTarget,
 	now time.Time,
-) (bool, error) {
-	if !agent.config.RestartPodApproved {
-		return false, nil
-	}
-	if agent.approvals == nil {
-		return false, errors.New("approval store is not configured")
+) (storedApprovalCheck, error) {
+	if !agent.config.RestartPodApproved ||
+		action != string(ActionRestartPod) {
+		return storedApprovalCheck{
+			Status: storedApprovalDisabled,
+		}, nil
 	}
 
 	plan, err := approvaldomain.NewPlan(
@@ -223,9 +236,15 @@ func (agent *sreAgent) storedApprovalGranted(
 		},
 	)
 	if err != nil {
-		return false, fmt.Errorf(
+		return storedApprovalCheck{}, fmt.Errorf(
 			"create canonical remediation plan: %w",
 			err,
+		)
+	}
+
+	if agent.approvals == nil {
+		return storedApprovalCheck{}, errors.New(
+			"approval store is not configured",
 		)
 	}
 
@@ -238,10 +257,13 @@ func (agent *sreAgent) storedApprovalGranted(
 		},
 	)
 	if errors.Is(err, approvaldomain.ErrApprovalNotFound) {
-		return false, nil
+		return storedApprovalCheck{
+			Status: storedApprovalWaiting,
+			Plan:   plan,
+		}, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf(
+		return storedApprovalCheck{}, fmt.Errorf(
 			"lookup remediation approval: %w",
 			err,
 		)
@@ -252,14 +274,26 @@ func (agent *sreAgent) storedApprovalGranted(
 		plan,
 		now,
 	); err != nil {
-		return false, fmt.Errorf(
+		if errors.Is(err, approvaldomain.ErrApprovalExpired) ||
+			errors.Is(err, approvaldomain.ErrApprovalNotYetValid) {
+			return storedApprovalCheck{
+				Status: storedApprovalWaiting,
+				Plan:   plan,
+			}, nil
+		}
+
+		return storedApprovalCheck{}, fmt.Errorf(
 			"validate remediation approval: %w",
 			err,
 		)
 	}
 
-	return true, nil
+	return storedApprovalCheck{
+		Status: storedApprovalGranted,
+		Plan:   plan,
+	}, nil
 }
+
 func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	namespace := alert.Labels["namespace"]
 	podName := alert.Labels["pod"]
@@ -471,16 +505,19 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		}
 		currentIncident = transitionedIncident
 	}
-	approvalCheckStartedAt := agent.now()
 
-	approvalGranted, approvalErr := agent.storedApprovalGranted(
+	approvalCheckStartedAt := agent.now()
+	approvalCheck, approvalErr := agent.checkStoredApproval(
 		ctx,
-		observedIncident.ID,
+		currentIncident.ID,
 		string(decision.Action),
 		podEvidence.Target,
 		agent.now(),
 	)
-	approvalCheckDuration := agent.now().Sub(approvalCheckStartedAt)
+	approvalCheckDuration := agent.now().Sub(
+		approvalCheckStartedAt,
+	)
+
 	if approvalErr != nil {
 		if ctx.Err() != nil {
 			return
@@ -488,18 +525,22 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 
 		agent.logger.Warn(
 			"approval_check_failed",
-			"incident_id", observedIncident.ID,
+			"incident_id", currentIncident.ID,
 			"action", decision.Action,
 			"target", targetLabel,
 			"result", "NO_ACTION",
+			"duration_ms",
+			approvalCheckDuration.Milliseconds(),
 			"error_code", "APPROVAL_CHECK_FAILED",
-			"duration_ms", approvalCheckDuration.Milliseconds(),
 			"error", approvalErr,
 		)
 		return
 	}
 
-	policyResult := EvaluateDecision(decision, PolicyContext{
+	approvalGranted :=
+		approvalCheck.Status == storedApprovalGranted
+
+	policyContext := PolicyContext{
 		IncidentID:             incidentID,
 		CurrentTarget:          podEvidence.Target,
 		AllowedNamespaces:      agent.config.AllowedNamespaces,
@@ -511,7 +552,103 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		InCooldown:             remediationState.InCooldown,
 		AttemptsInWindow:       remediationState.AttemptsInWindow,
 		MaximumAttempts:        agent.config.MaximumAttempts,
-	})
+	}
+	policyResult := EvaluateDecision(
+		decision,
+		policyContext,
+	)
+
+	if approvalCheck.Status == storedApprovalWaiting {
+		eligibilityContext := policyContext
+		eligibilityContext.ApprovalGranted = true
+
+		eligibilityResult := EvaluateDecision(
+			decision,
+			eligibilityContext,
+		)
+		if !eligibilityResult.Allowed {
+			policyResult = eligibilityResult
+		} else {
+			if !claimEnabled {
+				agent.logger.Warn(
+					"incident_transition_failed",
+					"incident_id", currentIncident.ID,
+					"action", decision.Action,
+					"target", targetLabel,
+					"result", "NO_ACTION",
+					"duration_ms",
+					approvalCheckDuration.Milliseconds(),
+					"error_code",
+					"INCIDENT_WAITING_APPROVAL_FENCE_UNAVAILABLE",
+				)
+				return
+			}
+
+			transitionStartedAt := agent.now()
+			waitingIncident, transitionErr :=
+				agent.incidents.Transition(
+					ctx,
+					incident.TransitionCommand{
+						IncidentID: currentIncident.ID,
+						ExpectedVersion: currentIncident.
+							Version,
+						To: incident.
+							StateWaitingApproval,
+						Actor: agent.config.
+							IncidentClaimHolderID,
+						ReasonCode: PolicyCodeApprovalRequired,
+						ApprovalBinding: incident.
+							ApprovalBinding{
+							PlanHash: approvalCheck.
+								Plan.Hash,
+							TargetUID: approvalCheck.
+								Plan.Target.UID,
+						},
+					},
+				)
+			transitionDuration := agent.now().Sub(
+				transitionStartedAt,
+			)
+
+			if transitionErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+
+				agent.logger.Warn(
+					"incident_transition_failed",
+					"incident_id", currentIncident.ID,
+					"action", decision.Action,
+					"target", targetLabel,
+					"result", "NO_ACTION",
+					"duration_ms",
+					transitionDuration.Milliseconds(),
+					"error_code",
+					"INCIDENT_WAITING_APPROVAL_TRANSITION_FAILED",
+					"error", transitionErr,
+				)
+				return
+			}
+
+			agent.logger.Info(
+				"incident_waiting_approval",
+				"incident_id", waitingIncident.ID,
+				"incident_version",
+				waitingIncident.Version,
+				"action", decision.Action,
+				"target", targetLabel,
+				"target_uid",
+				approvalCheck.Plan.Target.UID,
+				"plan_hash", approvalCheck.Plan.Hash,
+				"result", "WAITING_APPROVAL",
+				"duration_ms",
+				transitionDuration.Milliseconds(),
+				"error_code",
+				PolicyCodeApprovalRequired,
+			)
+			return
+		}
+	}
 
 	if !policyResult.Allowed {
 		recordContext, cancelRecord := context.WithTimeout(

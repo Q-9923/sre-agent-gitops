@@ -265,12 +265,6 @@ func TestHandlePodCrashLoopingFailsClosedForInvalidOrUnavailableApproval(
 		lookupErr error
 	}{
 		{
-			name: "expired approval",
-			mutate: func(granted *approval.Approval) {
-				granted.ExpiresAt = observedAt
-			},
-		},
-		{
 			name: "tampered plan hash",
 			mutate: func(granted *approval.Approval) {
 				granted.PlanHash = "sha256:tampered"
