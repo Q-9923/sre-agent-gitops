@@ -103,6 +103,8 @@ func main() {
 		readiness.markSuccessfulCycle,
 		metrics.recordCycle,
 	)
+	agent.plans = incidentHandle.Plans
+
 	applicationErr := runApplication(
 		ctx,
 		healthListener,

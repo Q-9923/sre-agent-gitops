@@ -37,6 +37,7 @@ type sreAgent struct {
 	incidents           incidentRegistry
 	memory              remediationStateStore
 	approvals           approvaldomain.Store
+	plans               approvaldomain.PlanStore
 	logger              *slog.Logger
 	now                 func() time.Time
 	markCycleProgress   func()
@@ -444,6 +445,20 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		return
 	}
 
+	if currentIncident.State == incident.StateWaitingApproval {
+		agent.resumeWaitingApproval(
+			ctx,
+			incidentID,
+			currentIncident,
+			podEvidence,
+			remediationState,
+			targetKey,
+			targetLabel,
+			now,
+		)
+		return
+	}
+
 	evidence := IncidentEvidence{
 		IncidentID: incidentID,
 		Alert: AlertEvidence{
@@ -584,6 +599,39 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 				return
 			}
 
+			planPublishStartedAt := agent.now()
+			planContext, cancelPlan := context.WithTimeout(
+				ctx,
+				agent.config.KubernetesRequestTimeout,
+			)
+			planPublishErr := agent.publishCanonicalPlan(
+				planContext,
+				approvalCheck.Plan,
+			)
+			cancelPlan()
+			planPublishDuration := agent.now().Sub(
+				planPublishStartedAt,
+			)
+
+			if planPublishErr != nil {
+				if ctx.Err() != nil {
+					return
+				}
+
+				agent.logger.Warn(
+					"incident_plan_publish_failed",
+					"incident_id", currentIncident.ID,
+					"action", decision.Action,
+					"target", targetLabel,
+					"result", "NO_ACTION",
+					"duration_ms",
+					planPublishDuration.Milliseconds(),
+					"error_code",
+					"INCIDENT_PLAN_PUBLISH_FAILED",
+					"error", planPublishErr,
+				)
+				return
+			}
 			transitionStartedAt := agent.now()
 			waitingIncident, transitionErr :=
 				agent.incidents.Transition(

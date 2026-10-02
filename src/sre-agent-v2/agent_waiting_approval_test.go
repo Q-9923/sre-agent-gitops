@@ -521,6 +521,7 @@ func (harness *waitingApprovalHarness) newAgent(
 		},
 		incidents: registry,
 		approvals: approvalStore,
+		plans:     approval.NewMemoryPlanStore(),
 		memory:    harness.stateStore,
 		logger: slog.New(
 			slog.NewJSONHandler(&harness.logs, nil),

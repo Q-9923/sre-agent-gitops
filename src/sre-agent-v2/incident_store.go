@@ -30,6 +30,7 @@ type incidentRegistry interface {
 type incidentRegistryHandle struct {
 	Registry  incidentRegistry
 	Approvals approvaldomain.Store
+	Plans     approvaldomain.PlanStore
 	close     func()
 }
 
@@ -52,8 +53,10 @@ func openIncidentRegistry(
 		return incidentRegistryHandle{
 			Registry:  incident.NewMemoryRegistry(),
 			Approvals: approvaldomain.NewMemoryStore(),
+			Plans:     approvaldomain.NewMemoryPlanStore(),
 			close:     func() {},
 		}, nil
+
 	case "postgres":
 		poolConfig, err := pgxpool.ParseConfig(
 			config.IncidentStorePostgresDSN,
@@ -68,7 +71,6 @@ func openIncidentRegistry(
 			ctx,
 			config.IncidentStoreConnectTimeout,
 		)
-
 		pool, err := pgxpool.NewWithConfig(
 			connectCtx,
 			poolConfig,
@@ -100,7 +102,6 @@ func openIncidentRegistry(
 			pool,
 		)
 		cancelMigration()
-
 		if migrationErr != nil {
 			pool.Close()
 			return incidentRegistryHandle{}, fmt.Errorf(
@@ -112,6 +113,7 @@ func openIncidentRegistry(
 		return incidentRegistryHandle{
 			Registry:  postgresadapter.NewRegistry(pool),
 			Approvals: postgresadapter.NewApprovalStore(pool),
+			Plans:     postgresadapter.NewPlanStore(pool),
 			close:     pool.Close,
 		}, nil
 
