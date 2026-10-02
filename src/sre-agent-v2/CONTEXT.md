@@ -47,9 +47,12 @@ _Avoid_: Active Claim, Approval
 **Approval**:
 对指定 Incident、Plan 和目标资源身份授予的有限期执行许可。
 
-**Action Attempt**:
-根据已批准 Plan 发起的一次受预算约束的修复尝试。
+**Execution Key**:
+由 Incident、Plan Hash、目标 UID 和 Fencing Token 组成的执行身份；同一 Execution Key 只能对应一次 Action Attempt。
+_Avoid_: Retry Key, Request ID
 
+**Action Attempt**:
+根据已批准 Plan 和有效 Fencing Token 发起的一次受预算约束的修复尝试；重试同一 Execution Key 不会创建新的尝试。
 **Verification**:
 独立判断修复后目标是否恢复的结果。
 
