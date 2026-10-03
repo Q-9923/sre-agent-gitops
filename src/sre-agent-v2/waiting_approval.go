@@ -193,8 +193,21 @@ func (agent *sreAgent) resumeWaitingApproval(
 		ctx,
 		agent.config.KubernetesRequestTimeout,
 	)
-	err = agent.executeApprovedPlan(actionContext, plan)
+	err = agent.executeApprovedPlan(
+		actionContext,
+		plan,
+	)
 	cancelAction()
+
+	if !agent.completeActionAttempt(
+		ctx,
+		actionAttempt,
+		plan.Action,
+		targetLabel,
+		err,
+	) {
+		return
+	}
 
 	if err != nil {
 		agent.logger.Error(
@@ -215,10 +228,12 @@ func (agent *sreAgent) resumeWaitingApproval(
 		"action", plan.Action,
 		"target", targetLabel,
 		"attempt_id", actionAttempt.ID,
-		"fencing_token", actionAttempt.Key.FencingToken,
+		"fencing_token",
+		actionAttempt.Key.FencingToken,
 		"result", "SUBMITTED",
 		"error_code", "",
 	)
+
 }
 
 func (agent *sreAgent) recoverWaitingApprovalPlan(

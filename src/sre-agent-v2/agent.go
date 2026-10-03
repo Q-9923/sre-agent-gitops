@@ -793,9 +793,28 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	if !shouldExecute {
 		return
 	}
-	actionContext, cancelAction := context.WithTimeout(ctx, agent.config.KubernetesRequestTimeout)
-	err = executeApprovedAction(actionContext, agent.kubernetes, decision)
+
+	actionContext, cancelAction := context.WithTimeout(
+		ctx,
+		agent.config.KubernetesRequestTimeout,
+	)
+	err = executeApprovedAction(
+		actionContext,
+		agent.kubernetes,
+		decision,
+	)
 	cancelAction()
+
+	if !agent.completeActionAttempt(
+		ctx,
+		actionAttempt,
+		decision.Action,
+		targetLabel,
+		err,
+	) {
+		return
+	}
+
 	if err != nil {
 		agent.logger.Error(
 			"remediation_failed",
@@ -815,7 +834,8 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		"action", decision.Action,
 		"target", targetLabel,
 		"attempt_id", actionAttempt.ID,
-		"fencing_token", actionAttempt.Key.FencingToken,
+		"fencing_token",
+		actionAttempt.Key.FencingToken,
 		"result", "SUBMITTED",
 		"error_code", "",
 	)

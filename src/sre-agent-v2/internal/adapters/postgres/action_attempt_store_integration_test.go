@@ -340,3 +340,466 @@ func assertSameActionAttempt(
 		)
 	}
 }
+func TestActionAttemptStoreBeginReturnsExistingAcrossFencingTokensPostgreSQL(
+	t *testing.T,
+) {
+	pool, firstCommand := newActionAttemptPostgresFixture(
+		t,
+		"cross-fencing-recovery",
+	)
+
+	firstStore := NewActionAttemptStore(pool)
+	first, created, err := firstStore.Begin(
+		context.Background(),
+		firstCommand,
+	)
+	if err != nil {
+		t.Fatalf("first Begin() error = %v", err)
+	}
+	if !created {
+		t.Fatal("first Begin() created = false; want true")
+	}
+
+	registry := NewRegistry(pool)
+
+	takeoverClaim, err := registry.Claim(
+		context.Background(),
+		incident.ClaimCommand{
+			IncidentID: firstCommand.Key.IncidentID,
+			ExpectedVersion: firstCommand.
+				Key.FencingToken,
+			HolderID: "agent-action-attempt-recovery",
+			Now: firstCommand.StartedAt.Add(
+				time.Minute,
+			),
+			LeaseDuration: 30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("takeover Claim() error = %v", err)
+	}
+
+	takeoverCommand := firstCommand
+	takeoverCommand.Key.FencingToken =
+		takeoverClaim.Incident.Version
+	takeoverCommand.StartedAt =
+		firstCommand.StartedAt.Add(time.Minute)
+
+	restartedStore := NewActionAttemptStore(pool)
+	recovered, created, err := restartedStore.Begin(
+		context.Background(),
+		takeoverCommand,
+	)
+	if err != nil {
+		t.Fatalf("takeover Begin() error = %v", err)
+	}
+	if created {
+		t.Fatal(
+			"takeover Begin() created = true; " +
+				"want existing attempt across fencing tokens",
+		)
+	}
+
+	if recovered.ID != first.ID {
+		t.Fatalf(
+			"recovered attempt ID = %q; want %q",
+			recovered.ID,
+			first.ID,
+		)
+	}
+	if recovered.Key.FencingToken !=
+		firstCommand.Key.FencingToken {
+		t.Fatalf(
+			"recovered FencingToken = %d; want original %d",
+			recovered.Key.FencingToken,
+			firstCommand.Key.FencingToken,
+		)
+	}
+	if !recovered.StartedAt.Equal(first.StartedAt) {
+		t.Fatalf(
+			"recovered StartedAt = %s; want original %s",
+			recovered.StartedAt,
+			first.StartedAt,
+		)
+	}
+
+	var storedCount int
+
+	err = pool.QueryRow(
+		context.Background(),
+		`
+SELECT count(*)
+FROM action_attempts
+WHERE incident_id = $1
+  AND plan_hash = $2
+  AND target_uid = $3
+`,
+		firstCommand.Key.IncidentID,
+		firstCommand.Key.PlanHash,
+		firstCommand.Key.TargetUID,
+	).Scan(&storedCount)
+	if err != nil {
+		t.Fatalf("count action attempts error = %v", err)
+	}
+	if storedCount != 1 {
+		t.Fatalf(
+			"stored action attempt count = %d; want 1",
+			storedCount,
+		)
+	}
+}
+func TestActionAttemptStorePersistsCompletionAcrossAdapterRestartPostgreSQL(
+	t *testing.T,
+) {
+	tests := []struct {
+		name      string
+		status    remediationdomain.ActionAttemptStatus
+		errorCode string
+	}{
+		{
+			name:   "succeeded",
+			status: remediationdomain.ActionAttemptStatusSucceeded,
+		},
+		{
+			name:      "failed",
+			status:    remediationdomain.ActionAttemptStatusFailed,
+			errorCode: "KUBERNETES_ACTION_REJECTED",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			pool, beginCommand :=
+				newActionAttemptPostgresFixture(
+					t,
+					"completion-"+testCase.name,
+				)
+
+			store := NewActionAttemptStore(pool)
+
+			started, created, err := store.Begin(
+				context.Background(),
+				beginCommand,
+			)
+			if err != nil {
+				t.Fatalf("Begin() error = %v", err)
+			}
+			if !created {
+				t.Fatal(
+					"Begin() created = false; want true",
+				)
+			}
+
+			finishedAt := beginCommand.StartedAt.Add(
+				5 * time.Second,
+			)
+
+			completed, err := store.Complete(
+				context.Background(),
+				remediationdomain.
+					CompleteActionAttemptCommand{
+					Key: beginCommand.Key,
+					ExpectedVersion: started.
+						Version,
+					To:         testCase.status,
+					FinishedAt: finishedAt,
+					ErrorCode:  testCase.errorCode,
+				},
+			)
+			if err != nil {
+				t.Fatalf("Complete() error = %v", err)
+			}
+
+			if completed.ID != started.ID {
+				t.Fatalf(
+					"completed ID = %q; want %q",
+					completed.ID,
+					started.ID,
+				)
+			}
+			if completed.Status != testCase.status {
+				t.Fatalf(
+					"completed Status = %q; want %q",
+					completed.Status,
+					testCase.status,
+				)
+			}
+			if completed.Version != started.Version+1 {
+				t.Fatalf(
+					"completed Version = %d; want %d",
+					completed.Version,
+					started.Version+1,
+				)
+			}
+			if completed.FinishedAt == nil ||
+				!completed.FinishedAt.Equal(finishedAt) {
+				t.Fatalf(
+					"completed FinishedAt = %v; want %s",
+					completed.FinishedAt,
+					finishedAt,
+				)
+			}
+			if completed.ErrorCode !=
+				testCase.errorCode {
+				t.Fatalf(
+					"completed ErrorCode = %q; want %q",
+					completed.ErrorCode,
+					testCase.errorCode,
+				)
+			}
+			if completed.RecoveredByFencingToken != 0 {
+				t.Fatalf(
+					"completed RecoveredByFencingToken = %d; want 0",
+					completed.
+						RecoveredByFencingToken,
+				)
+			}
+
+			restartedStore := NewActionAttemptStore(pool)
+
+			retryCommand := beginCommand
+			retryCommand.StartedAt =
+				beginCommand.StartedAt.Add(time.Hour)
+
+			restored, created, err :=
+				restartedStore.Begin(
+					context.Background(),
+					retryCommand,
+				)
+			if err != nil {
+				t.Fatalf(
+					"restarted Begin() error = %v",
+					err,
+				)
+			}
+			if created {
+				t.Fatal(
+					"restarted Begin() created = true; want false",
+				)
+			}
+
+			if restored.Status != testCase.status {
+				t.Fatalf(
+					"restored Status = %q; want %q",
+					restored.Status,
+					testCase.status,
+				)
+			}
+			if restored.Version != completed.Version {
+				t.Fatalf(
+					"restored Version = %d; want %d",
+					restored.Version,
+					completed.Version,
+				)
+			}
+			if restored.FinishedAt == nil ||
+				!restored.FinishedAt.Equal(finishedAt) {
+				t.Fatalf(
+					"restored FinishedAt = %v; want %s",
+					restored.FinishedAt,
+					finishedAt,
+				)
+			}
+			if restored.ErrorCode !=
+				testCase.errorCode {
+				t.Fatalf(
+					"restored ErrorCode = %q; want %q",
+					restored.ErrorCode,
+					testCase.errorCode,
+				)
+			}
+			if restored.RecoveredByFencingToken != 0 {
+				t.Fatalf(
+					"restored RecoveredByFencingToken = %d; want 0",
+					restored.
+						RecoveredByFencingToken,
+				)
+			}
+		})
+	}
+}
+
+func TestActionAttemptStoreRecoversAbandonedStartedAttemptPostgreSQL(
+	t *testing.T,
+) {
+	pool, beginCommand := newActionAttemptPostgresFixture(
+		t,
+		"abandoned-recovery",
+	)
+
+	firstStore := NewActionAttemptStore(pool)
+
+	started, created, err := firstStore.Begin(
+		context.Background(),
+		beginCommand,
+	)
+	if err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	if !created {
+		t.Fatal("Begin() created = false; want true")
+	}
+
+	registry := NewRegistry(pool)
+
+	takeoverTime := beginCommand.StartedAt.Add(time.Minute)
+
+	takeover, err := registry.Claim(
+		context.Background(),
+		incident.ClaimCommand{
+			IncidentID: beginCommand.Key.IncidentID,
+			ExpectedVersion: beginCommand.
+				Key.FencingToken,
+			HolderID:      "agent-recovery",
+			Now:           takeoverTime,
+			LeaseDuration: 30 * time.Second,
+		},
+	)
+	if err != nil {
+		t.Fatalf("takeover Claim() error = %v", err)
+	}
+
+	recoveryKey := beginCommand.Key
+	recoveryKey.FencingToken =
+		takeover.Incident.Version
+
+	restartedStore := NewActionAttemptStore(pool)
+
+	recovered, changed, err := restartedStore.Recover(
+		context.Background(),
+		remediationdomain.RecoverActionAttemptCommand{
+			Key:         recoveryKey,
+			RecoveredAt: takeoverTime,
+			ReasonCode:  "PREVIOUS_EXECUTOR_LOST",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("Recover() changed = false; want true")
+	}
+
+	if recovered.ID != started.ID {
+		t.Fatalf(
+			"recovered ID = %q; want %q",
+			recovered.ID,
+			started.ID,
+		)
+	}
+	if recovered.Status !=
+		remediationdomain.ActionAttemptStatusUnknown {
+		t.Fatalf(
+			"recovered Status = %q; want %q",
+			recovered.Status,
+			remediationdomain.
+				ActionAttemptStatusUnknown,
+		)
+	}
+	if recovered.Version != started.Version+1 {
+		t.Fatalf(
+			"recovered Version = %d; want %d",
+			recovered.Version,
+			started.Version+1,
+		)
+	}
+	if recovered.FinishedAt == nil ||
+		!recovered.FinishedAt.Equal(takeoverTime) {
+		t.Fatalf(
+			"recovered FinishedAt = %v; want %s",
+			recovered.FinishedAt,
+			takeoverTime,
+		)
+	}
+	if recovered.ErrorCode !=
+		"PREVIOUS_EXECUTOR_LOST" {
+		t.Fatalf(
+			"recovered ErrorCode = %q; want %q",
+			recovered.ErrorCode,
+			"PREVIOUS_EXECUTOR_LOST",
+		)
+	}
+	if recovered.Key.FencingToken !=
+		beginCommand.Key.FencingToken {
+		t.Fatalf(
+			"attempt FencingToken = %d; want original %d",
+			recovered.Key.FencingToken,
+			beginCommand.Key.FencingToken,
+		)
+	}
+	if recovered.RecoveredByFencingToken !=
+		recoveryKey.FencingToken {
+		t.Fatalf(
+			"RecoveredByFencingToken = %d; want %d",
+			recovered.RecoveredByFencingToken,
+			recoveryKey.FencingToken,
+		)
+	}
+
+	secondRestart := NewActionAttemptStore(pool)
+
+	retry, changed, err := secondRestart.Recover(
+		context.Background(),
+		remediationdomain.RecoverActionAttemptCommand{
+			Key:         recoveryKey,
+			RecoveredAt: takeoverTime,
+			ReasonCode:  "PREVIOUS_EXECUTOR_LOST",
+		},
+	)
+	if err != nil {
+		t.Fatalf("retry Recover() error = %v", err)
+	}
+	if changed {
+		t.Fatal("retry Recover() changed = true; want false")
+	}
+	if retry.Status !=
+		remediationdomain.ActionAttemptStatusUnknown {
+		t.Fatalf(
+			"retry Status = %q; want %q",
+			retry.Status,
+			remediationdomain.
+				ActionAttemptStatusUnknown,
+		)
+	}
+	if retry.Version != recovered.Version {
+		t.Fatalf(
+			"retry Version = %d; want %d",
+			retry.Version,
+			recovered.Version,
+		)
+	}
+
+	retryBegin := beginCommand
+	retryBegin.Key = recoveryKey
+	retryBegin.StartedAt = takeoverTime.Add(time.Second)
+
+	restored, created, err := secondRestart.Begin(
+		context.Background(),
+		retryBegin,
+	)
+	if err != nil {
+		t.Fatalf("restarted Begin() error = %v", err)
+	}
+	if created {
+		t.Fatal(
+			"restarted Begin() created = true; want false",
+		)
+	}
+	if restored.Status !=
+		remediationdomain.ActionAttemptStatusUnknown {
+		t.Fatalf(
+			"restored Status = %q; want %q",
+			restored.Status,
+			remediationdomain.
+				ActionAttemptStatusUnknown,
+		)
+	}
+	if restored.RecoveredByFencingToken !=
+		recoveryKey.FencingToken {
+		t.Fatalf(
+			"restored RecoveredByFencingToken = %d; want %d",
+			restored.RecoveredByFencingToken,
+			recoveryKey.FencingToken,
+		)
+	}
+}

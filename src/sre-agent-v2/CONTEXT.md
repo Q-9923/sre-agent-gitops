@@ -47,14 +47,30 @@ _Avoid_: Active Claim, Approval
 **Approval**:
 对指定 Incident、Plan 和目标资源身份授予的有限期执行许可。
 
-**Execution Key**:
-由 Incident、Plan Hash、目标 UID 和 Fencing Token 组成的执行身份；同一 Execution Key 只能对应一次 Action Attempt。
+**Action Key**:
+由 Incident、Plan Hash 和目标 UID 组成的稳定动作身份；Lease Holder 或 Fencing Token 变化不会产生新的 Action Key。
 _Avoid_: Retry Key, Request ID
 
+**Execution Key**:
+由 Action Key 和 Fencing Token 组成的单次执行所有权身份；它用于 fencing，不作为跨 Claim 代次的幂等身份。
+_Avoid_: Action Key, Credential
+
 **Action Attempt**:
-根据已批准 Plan 和有效 Fencing Token 发起的一次受预算约束的修复尝试；重试同一 Execution Key 不会创建新的尝试。
+根据已批准 Plan 发起的一次受预算约束的修复尝试；同一 Action Key 只能对应一个 Action Attempt，其最初的 Fencing Token 用于标识发起该尝试的所有权代次。
+
+**Action Attempt Status**:
+Action Attempt 的持久化执行结果：
+
+- `STARTED`：已取得执行资格，但尚未持久化确定结果。
+- `SUCCEEDED`：Kubernetes 动作调用已成功返回。
+- `FAILED`：Kubernetes 动作调用返回了确定的失败结果。
+- `UNKNOWN`：旧执行器失联后无法安全判断动作结果；不得自动重放，必须进入独立 Verification。
+
+`SUCCEEDED`、`FAILED` 和 `UNKNOWN` 均为终态；同一 Action Key 不得创建或执行第二个 Action Attempt。
+_Avoid_: Incident State, Verification
+
 **Verification**:
-独立判断修复后目标是否恢复的结果。
+独立判断修复后目标是否恢复的结果；不得仅根据 Action Attempt 的 `SUCCEEDED`、`FAILED` 或 `UNKNOWN` 推断目标已经恢复。
 
 **Waiting Approval**:
 Incident 已形成确定的候选 Plan，但尚未取得与该 Plan 和目标资源身份完全匹配的有效 Approval；该 Incident 仍保持活跃并可在后续恢复处理。
