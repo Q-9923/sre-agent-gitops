@@ -11,6 +11,7 @@ import (
 	"net/http"
 	approvaldomain "sre-agent/internal/approval"
 	"sre-agent/internal/incident"
+	remediationdomain "sre-agent/internal/remediation"
 	"time"
 )
 
@@ -38,6 +39,7 @@ type sreAgent struct {
 	memory              remediationStateStore
 	approvals           approvaldomain.Store
 	plans               approvaldomain.PlanStore
+	actionAttempts      remediationdomain.ActionAttemptStore
 	logger              *slog.Logger
 	now                 func() time.Time
 	markCycleProgress   func()
@@ -782,37 +784,15 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		return
 	}
 
-	actionFenceStartedAt := agent.now()
-	_, actionFenceErr := agent.incidents.Claim(
+	actionAttempt, shouldExecute := agent.beginActionAttempt(
 		ctx,
-		incident.ClaimCommand{
-			IncidentID:      currentIncident.ID,
-			ExpectedVersion: currentIncident.Version,
-			HolderID:        agent.config.IncidentClaimHolderID,
-			Now:             agent.now(),
-			LeaseDuration:   agent.config.IncidentClaimLeaseDuration,
-		},
+		currentIncident,
+		approvalCheck.Plan,
+		targetLabel,
 	)
-	actionFenceDuration := agent.now().Sub(actionFenceStartedAt)
-
-	if actionFenceErr != nil {
-		if ctx.Err() != nil {
-			return
-		}
-
-		agent.logger.Warn(
-			"incident_action_fence_failed",
-			"incident_id", currentIncident.ID,
-			"action", decision.Action,
-			"target", targetLabel,
-			"result", "NO_ACTION",
-			"duration_ms", actionFenceDuration.Milliseconds(),
-			"error_code", "INCIDENT_ACTION_FENCE_FAILED",
-			"error", actionFenceErr,
-		)
+	if !shouldExecute {
 		return
 	}
-
 	actionContext, cancelAction := context.WithTimeout(ctx, agent.config.KubernetesRequestTimeout)
 	err = executeApprovedAction(actionContext, agent.kubernetes, decision)
 	cancelAction()
@@ -834,6 +814,8 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		"incident_id", incidentID,
 		"action", decision.Action,
 		"target", targetLabel,
+		"attempt_id", actionAttempt.ID,
+		"fencing_token", actionAttempt.Key.FencingToken,
 		"result", "SUBMITTED",
 		"error_code", "",
 	)

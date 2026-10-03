@@ -10,6 +10,7 @@ import (
 	postgresadapter "sre-agent/internal/adapters/postgres"
 	approvaldomain "sre-agent/internal/approval"
 	"sre-agent/internal/incident"
+	remediationdomain "sre-agent/internal/remediation"
 )
 
 type incidentRegistry interface {
@@ -28,10 +29,11 @@ type incidentRegistry interface {
 }
 
 type incidentRegistryHandle struct {
-	Registry  incidentRegistry
-	Approvals approvaldomain.Store
-	Plans     approvaldomain.PlanStore
-	close     func()
+	Registry       incidentRegistry
+	Approvals      approvaldomain.Store
+	Plans          approvaldomain.PlanStore
+	ActionAttempts remediationdomain.ActionAttemptStore
+	close          func()
 }
 
 func (handle incidentRegistryHandle) Close() {
@@ -51,10 +53,11 @@ func openIncidentRegistry(
 	switch config.IncidentStoreBackend {
 	case "memory":
 		return incidentRegistryHandle{
-			Registry:  incident.NewMemoryRegistry(),
-			Approvals: approvaldomain.NewMemoryStore(),
-			Plans:     approvaldomain.NewMemoryPlanStore(),
-			close:     func() {},
+			Registry:       incident.NewMemoryRegistry(),
+			Approvals:      approvaldomain.NewMemoryStore(),
+			Plans:          approvaldomain.NewMemoryPlanStore(),
+			ActionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+			close:          func() {},
 		}, nil
 
 	case "postgres":
@@ -111,10 +114,11 @@ func openIncidentRegistry(
 		}
 
 		return incidentRegistryHandle{
-			Registry:  postgresadapter.NewRegistry(pool),
-			Approvals: postgresadapter.NewApprovalStore(pool),
-			Plans:     postgresadapter.NewPlanStore(pool),
-			close:     pool.Close,
+			Registry:       postgresadapter.NewRegistry(pool),
+			Approvals:      postgresadapter.NewApprovalStore(pool),
+			Plans:          postgresadapter.NewPlanStore(pool),
+			ActionAttempts: postgresadapter.NewActionAttemptStore(pool),
+			close:          pool.Close,
 		}, nil
 
 	default:

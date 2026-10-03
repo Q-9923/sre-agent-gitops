@@ -370,6 +370,12 @@ func TestHandlePodCrashLoopingDoesNotActWhenWaitingApprovalFenceConflicts(
 			registry.claimCalls,
 		)
 	}
+	if harness.stateStore.recordCalls != 1 {
+		t.Fatalf(
+			"remediation Record calls before final fence = %d; want 1",
+			harness.stateStore.recordCalls,
+		)
+	}
 	if decisionSource.calls != 1 {
 		t.Fatalf(
 			"decision calls = %d; want 1",

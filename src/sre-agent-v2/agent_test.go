@@ -16,6 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"sre-agent/internal/approval"
 	"sre-agent/internal/incident"
+
+	remediationdomain "sre-agent/internal/remediation"
 )
 
 func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(
@@ -121,14 +123,16 @@ func TestHandlePodCrashLoopingConnectsEvidenceDecisionPolicyAndUIDDelete(
 			IncidentClaimHolderID:      "agent-a",
 			IncidentClaimLeaseDuration: 30 * time.Second,
 		},
-		kubernetes: kubernetesClient,
-		collector:  &stubContextCollector{evidence: podEvidence},
-		ollama:     decider,
-		incidents:  registry,
-		approvals:  approvalStore,
-		memory:     newRemediationMemory(),
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		now:        func() time.Time { return observedAt },
+		kubernetes:     kubernetesClient,
+		collector:      &stubContextCollector{evidence: podEvidence},
+		ollama:         decider,
+		incidents:      registry,
+		approvals:      approvalStore,
+		memory:         newRemediationMemory(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		now:            func() time.Time { return observedAt },
 	}
 
 	agent.handlePodCrashLooping(ctx, alert)
@@ -225,14 +229,16 @@ func TestHandlePodCrashLoopingDoesNotActWithoutStoredApproval(t *testing.T) {
 			IncidentClaimHolderID:      "agent-a",
 			IncidentClaimLeaseDuration: 30 * time.Second,
 		},
-		kubernetes: kubernetesClient,
-		collector:  &stubContextCollector{evidence: podEvidence},
-		ollama:     decider,
-		incidents:  incident.NewMemoryRegistry(),
-		approvals:  approval.NewMemoryStore(),
-		memory:     newRemediationMemory(),
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
-		now:        func() time.Time { return observedAt },
+		kubernetes:     kubernetesClient,
+		collector:      &stubContextCollector{evidence: podEvidence},
+		ollama:         decider,
+		incidents:      incident.NewMemoryRegistry(),
+		approvals:      approval.NewMemoryStore(),
+		memory:         newRemediationMemory(),
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		now:            func() time.Time { return observedAt },
 	}
 
 	agent.handlePodCrashLooping(
@@ -402,9 +408,11 @@ func TestHandlePodCrashLoopingFailsClosedForInvalidOrUnavailableApproval(
 				ollama: &stubDecisionSource{
 					decision: decision,
 				},
-				incidents: registry,
-				approvals: approvalStore,
-				memory:    newRemediationMemory(),
+				incidents:      registry,
+				approvals:      approvalStore,
+				memory:         newRemediationMemory(),
+				plans:          approval.NewMemoryPlanStore(),
+				actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 				logger: slog.New(
 					slog.NewJSONHandler(&logOutput, nil),
 				),
@@ -550,9 +558,11 @@ func TestHandlePodCrashLoopingDoesNotActAfterClaimTakeover(
 		ollama: &stubDecisionSource{
 			decision: decision,
 		},
-		incidents: registry,
-		approvals: approvalStore,
-		memory:    stateStore,
+		incidents:      registry,
+		approvals:      approvalStore,
+		memory:         stateStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -636,13 +646,15 @@ func TestHandlePodCrashLoopingTreatsReactivatedAlertForSamePodAsDuplicate(
 			OllamaTimeout:            time.Second,
 			KubernetesRequestTimeout: time.Second,
 		},
-		kubernetes: kubernetesClient,
-		collector:  &stubContextCollector{evidence: podEvidence},
-		ollama:     decider,
-		incidents:  incident.NewMemoryRegistry(),
-		memory:     newRemediationMemory(),
-		logger:     slog.New(slog.NewJSONHandler(&logOutput, nil)),
-		now:        func() time.Time { return observedAt },
+		kubernetes:     kubernetesClient,
+		collector:      &stubContextCollector{evidence: podEvidence},
+		ollama:         decider,
+		incidents:      incident.NewMemoryRegistry(),
+		memory:         newRemediationMemory(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		logger:         slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:            func() time.Time { return observedAt },
 	}
 
 	agent.handlePodCrashLooping(context.Background(), alert)
@@ -718,8 +730,10 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateUnavailable(t *testi
 		memory: &failingRemediationStateStore{
 			err: errors.New("state unavailable"),
 		},
-		logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
-		now:    func() time.Time { return observedAt },
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		logger:         slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:            func() time.Time { return observedAt },
 	}
 
 	agent.handlePodCrashLooping(context.Background(), alert)
@@ -884,8 +898,10 @@ func TestHandlePodCrashLoopingDoesNotActWhenRemediationStateRecordFails(
 		memory: &recordFailingRemediationStateStore{
 			err: errors.New("persist state failed"),
 		},
-		logger: slog.New(slog.NewJSONHandler(&logOutput, nil)),
-		now:    func() time.Time { return observedAt },
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		logger:         slog.New(slog.NewJSONHandler(&logOutput, nil)),
+		now:            func() time.Time { return observedAt },
 	}
 
 	agent.handlePodCrashLooping(context.Background(), alert)
@@ -978,9 +994,11 @@ func TestRunCycleMarksReadinessAfterSuccessfulPrometheusQuery(t *testing.T) {
 	)
 
 	agent := &sreAgent{
-		prometheus: &stubFiringAlertSource{},
-		incidents:  incident.NewMemoryRegistry(),
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		prometheus:     &stubFiringAlertSource{},
+		incidents:      incident.NewMemoryRegistry(),
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		now: func() time.Time {
 			return observedAt
 		},
@@ -1097,6 +1115,8 @@ func TestRunCycleMarksLivenessProgressWhenPrometheusQueryFails(t *testing.T) {
 		now: func() time.Time {
 			return currentTime
 		},
+		plans:               approval.NewMemoryPlanStore(),
+		actionAttempts:      remediationdomain.NewMemoryActionAttemptStore(),
 		markCycleProgress:   liveness.markProgress,
 		markSuccessfulCycle: readiness.markSuccessfulCycle,
 	}
@@ -1252,6 +1272,8 @@ func TestRunCycleRefreshesLivenessBetweenActionableAlerts(t *testing.T) {
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		now: func() time.Time {
 			return currentTime
 		},
@@ -1297,8 +1319,10 @@ func TestSREAgentRunDoesNotStartCycleWhenContextAlreadyCanceled(
 		config: agentConfig{
 			PollInterval: time.Hour,
 		},
-		prometheus: alertSource,
-		incidents:  incident.NewMemoryRegistry(),
+		prometheus:     alertSource,
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1324,8 +1348,10 @@ func TestRunCycleDoesNotQueryPrometheusWhenContextCanceled(
 	alertSource := &countingAlertSourceForCanceledRun{}
 
 	agent := &sreAgent{
-		prometheus: alertSource,
-		incidents:  incident.NewMemoryRegistry(),
+		prometheus:     alertSource,
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1366,7 +1392,9 @@ func TestRunCycleDoesNotLogFailureOrRecordErrorWhenPrometheusCallIsCanceledByShu
 		prometheus: &cancelingAlertSourceForShutdown{
 			cancel: cancel,
 		},
-		incidents: incident.NewMemoryRegistry(),
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -1413,8 +1441,10 @@ func TestRunCycleLogsPrometheusFailureWhenApplicationContextIsActive(
 	var logOutput bytes.Buffer
 
 	agent := &sreAgent{
-		prometheus: &failingAlertSourceForLogging{},
-		incidents:  incident.NewMemoryRegistry(),
+		prometheus:     &failingAlertSourceForLogging{},
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -1464,8 +1494,10 @@ func TestSREAgentRunContinuesProcessingUntilContextCanceled(
 		config: agentConfig{
 			PollInterval: time.Millisecond,
 		},
-		prometheus: alertSource,
-		incidents:  incident.NewMemoryRegistry(),
+		prometheus:     alertSource,
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1516,8 +1548,10 @@ func TestRunCycleRecordsNoActionResult(t *testing.T) {
 	var recordedResults []string
 
 	agent := &sreAgent{
-		prometheus: &stubFiringAlertSource{},
-		incidents:  incident.NewMemoryRegistry(),
+		prometheus:     &stubFiringAlertSource{},
+		incidents:      incident.NewMemoryRegistry(),
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1567,6 +1601,8 @@ func TestRunCycleRecordsErrorWhenPrometheusQueryFails(t *testing.T) {
 		prometheus: &stubFiringAlertSource{
 			err: errors.New("prometheus unavailable"),
 		},
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1760,8 +1796,10 @@ func TestHandlePodCrashLoopingReportsDeniedIncidentStateRecordFailure(
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
-		ollama: decider,
-		memory: stateStore,
+		ollama:         decider,
+		memory:         stateStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -1858,6 +1896,8 @@ func TestHandlePodCrashLoopingObservesLifecycleIncidentBeforeRemediationState(
 		memory: &failingRemediationStateStore{
 			err: errors.New("remediation state unavailable"),
 		},
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -2048,8 +2088,10 @@ func TestHandlePodCrashLoopingDoesNotActWhenIncidentStoreUnavailable(
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
-		ollama: decider,
-		memory: stateStore,
+		ollama:         decider,
+		memory:         stateStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewJSONHandler(&logOutput, nil),
 		),
@@ -2204,8 +2246,10 @@ func TestHandlePodCrashLoopingUsesClaimVersionToFenceDiagnosisTransition(
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
-		ollama: decider,
-		memory: stateStore,
+		ollama:         decider,
+		memory:         stateStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -2338,8 +2382,10 @@ func TestHandlePodCrashLoopingDoesNotContinueWhenIncidentClaimIsHeld(
 		collector: &stubContextCollector{
 			evidence: podEvidence,
 		},
-		ollama: decider,
-		memory: stateStore,
+		ollama:         decider,
+		memory:         stateStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		logger: slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),

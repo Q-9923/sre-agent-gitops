@@ -121,7 +121,7 @@ func (agent *sreAgent) resumeWaitingApproval(
 		)
 		return
 	}
-
+	//Claim 配置检查
 	if agent.config.IncidentClaimHolderID == "" ||
 		agent.config.IncidentClaimLeaseDuration <= 0 {
 		agent.logger.Warn(
@@ -166,47 +166,26 @@ func (agent *sreAgent) resumeWaitingApproval(
 		return
 	}
 
-	actionFenceStartedAt := agent.now()
-	fencedClaim, err := agent.incidents.Claim(
+	actionAttempt, shouldExecute := agent.beginActionAttempt(
 		ctx,
-		incident.ClaimCommand{
-			IncidentID:      currentIncident.ID,
-			ExpectedVersion: currentIncident.Version,
-			HolderID:        agent.config.IncidentClaimHolderID,
-			Now:             agent.now(),
-			LeaseDuration:   agent.config.IncidentClaimLeaseDuration,
-		},
+		currentIncident,
+		plan,
+		targetLabel,
 	)
-	actionFenceDuration := agent.now().Sub(actionFenceStartedAt)
-
-	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-
-		agent.logger.Warn(
-			"incident_action_fence_failed",
-			"incident_id", currentIncident.ID,
-			"action", plan.Action,
-			"target", targetLabel,
-			"result", "NO_ACTION",
-			"duration_ms", actionFenceDuration.Milliseconds(),
-			"error_code", "INCIDENT_ACTION_FENCE_FAILED",
-			"error", err,
-		)
+	if !shouldExecute {
 		return
 	}
 
 	agent.logger.Info(
 		"incident_approval_resumed",
 		"incident_id", currentIncident.ID,
-		"incident_version", fencedClaim.Incident.Version,
+		"incident_version", actionAttempt.Key.FencingToken,
+		"attempt_id", actionAttempt.ID,
 		"action", plan.Action,
 		"target", targetLabel,
 		"target_uid", plan.Target.UID,
 		"plan_hash", plan.Hash,
 		"result", "APPROVED",
-		"duration_ms", actionFenceDuration.Milliseconds(),
 		"error_code", "",
 	)
 
@@ -235,6 +214,8 @@ func (agent *sreAgent) resumeWaitingApproval(
 		"incident_id", remediationIncidentID,
 		"action", plan.Action,
 		"target", targetLabel,
+		"attempt_id", actionAttempt.ID,
+		"fencing_token", actionAttempt.Key.FencingToken,
 		"result", "SUBMITTED",
 		"error_code", "",
 	)

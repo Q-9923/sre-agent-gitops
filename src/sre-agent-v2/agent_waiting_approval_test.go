@@ -16,6 +16,8 @@ import (
 
 	"sre-agent/internal/approval"
 	"sre-agent/internal/incident"
+
+	remediationdomain "sre-agent/internal/remediation"
 )
 
 func TestHandlePodCrashLoopingMovesIncidentToWaitingApproval(
@@ -519,10 +521,11 @@ func (harness *waitingApprovalHarness) newAgent(
 		ollama: &stubDecisionSource{
 			decision: harness.decision,
 		},
-		incidents: registry,
-		approvals: approvalStore,
-		plans:     approval.NewMemoryPlanStore(),
-		memory:    harness.stateStore,
+		incidents:      registry,
+		approvals:      approvalStore,
+		plans:          approval.NewMemoryPlanStore(),
+		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
+		memory:         harness.stateStore,
 		logger: slog.New(
 			slog.NewJSONHandler(&harness.logs, nil),
 		),

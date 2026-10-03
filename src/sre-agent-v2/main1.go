@@ -104,6 +104,7 @@ func main() {
 		metrics.recordCycle,
 	)
 	agent.plans = incidentHandle.Plans
+	agent.actionAttempts = incidentHandle.ActionAttempts
 
 	applicationErr := runApplication(
 		ctx,
