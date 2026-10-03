@@ -70,7 +70,12 @@ Action Attempt 的持久化执行结果：
 _Avoid_: Incident State, Verification
 
 **Verification**:
-独立判断修复后目标是否恢复的结果；不得仅根据 Action Attempt 的 `SUCCEEDED`、`FAILED` 或 `UNKNOWN` 推断目标已经恢复。
+独立于 Action Attempt 结果、针对同一动作执行的有界恢复检查；不得根据 Kubernetes 请求结果推断目标已经恢复。
+_Avoid_: Action Result
+
+**Verification Status**:
+Verification 的生命周期状态；`PENDING` 表示等待独立证据，`RECOVERED`、`NOT_RECOVERED` 和 `INCONCLUSIVE` 是不可变终态。
+_Avoid_: Action Attempt Status
 
 **Waiting Approval**:
 Incident 已形成确定的候选 Plan，但尚未取得与该 Plan 和目标资源身份完全匹配的有效 Approval；该 Incident 仍保持活跃并可在后续恢复处理。
