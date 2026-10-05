@@ -1872,3 +1872,287 @@ WHERE incident_id = $1
 		)
 	}
 }
+
+func TestRegistryTransitionPersistsVerifyingAcrossAdapterRestart(
+	t *testing.T,
+) {
+	ctx, pool, registry := newPostgresTestRegistry(t)
+
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-verifying-restart",
+			UID:       "pod-uid-verifying-restart",
+		},
+	}
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DETECTED -> DIAGNOSED) error = %v; want nil",
+			err,
+		)
+	}
+
+	verifying, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              incident.StateVerifying,
+			Actor:           "sre-agent",
+			ReasonCode:      "VERIFICATION_STARTED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DIAGNOSED -> VERIFYING) error = %v; want nil",
+			err,
+		)
+	}
+	if verifying.State != incident.StateVerifying {
+		t.Fatalf(
+			"verifying State = %q; want %q",
+			verifying.State,
+			incident.StateVerifying,
+		)
+	}
+	if verifying.Version != diagnosed.Version+1 {
+		t.Fatalf(
+			"verifying Version = %d; want %d",
+			verifying.Version,
+			diagnosed.Version+1,
+		)
+	}
+	if verifying.ApprovalBinding != (incident.ApprovalBinding{}) {
+		t.Fatalf(
+			"verifying ApprovalBinding = %#v; want empty",
+			verifying.ApprovalBinding,
+		)
+	}
+
+	restartedRegistry := NewRegistry(pool)
+
+	reloaded, created, err := restartedRegistry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Observe() after adapter restart error = %v; want nil",
+			err,
+		)
+	}
+	if created {
+		t.Fatal(
+			"Observe() after adapter restart created = true; " +
+				"want existing active VERIFYING incident",
+		)
+	}
+	if reloaded.ID != verifying.ID {
+		t.Fatalf(
+			"reloaded ID = %q; want %q",
+			reloaded.ID,
+			verifying.ID,
+		)
+	}
+	if reloaded.State != incident.StateVerifying {
+		t.Fatalf(
+			"reloaded State = %q; want %q",
+			reloaded.State,
+			incident.StateVerifying,
+		)
+	}
+	if reloaded.Version != verifying.Version {
+		t.Fatalf(
+			"reloaded Version = %d; want %d",
+			reloaded.Version,
+			verifying.Version,
+		)
+	}
+	if reloaded.ApprovalBinding != (incident.ApprovalBinding{}) {
+		t.Fatalf(
+			"reloaded ApprovalBinding = %#v; want empty",
+			reloaded.ApprovalBinding,
+		)
+	}
+}
+
+func TestRegistryTransitionFromWaitingApprovalToVerifyingPersistsBindingAcrossAdapterRestart(
+	t *testing.T,
+) {
+	ctx, pool, registry := newPostgresTestRegistry(t)
+
+	observation := incident.Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: incident.Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-approved-verification",
+			UID:       "pod-uid-approved-verification",
+		},
+	}
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              incident.StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DETECTED -> DIAGNOSED) error = %v; want nil",
+			err,
+		)
+	}
+
+	binding := incident.ApprovalBinding{
+		PlanHash:  "sha256:postgres-approved-verification-plan",
+		TargetUID: observation.Target.UID,
+	}
+
+	waiting, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              incident.StateWaitingApproval,
+			Actor:           "sre-agent",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: binding,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DIAGNOSED -> WAITING_APPROVAL) error = %v; want nil",
+			err,
+		)
+	}
+	if waiting.ApprovalBinding != binding {
+		t.Fatalf(
+			"waiting ApprovalBinding = %#v; want %#v",
+			waiting.ApprovalBinding,
+			binding,
+		)
+	}
+
+	verifying, err := registry.Transition(
+		ctx,
+		incident.TransitionCommand{
+			IncidentID:      waiting.ID,
+			ExpectedVersion: waiting.Version,
+			To:              incident.StateVerifying,
+			Actor:           "sre-agent",
+			ReasonCode:      "APPROVAL_VALIDATED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(WAITING_APPROVAL -> VERIFYING) error = %v; want nil",
+			err,
+		)
+	}
+	if verifying.State != incident.StateVerifying {
+		t.Fatalf(
+			"verifying State = %q; want %q",
+			verifying.State,
+			incident.StateVerifying,
+		)
+	}
+	if verifying.Version != waiting.Version+1 {
+		t.Fatalf(
+			"verifying Version = %d; want %d",
+			verifying.Version,
+			waiting.Version+1,
+		)
+	}
+	if verifying.ApprovalBinding != binding {
+		t.Fatalf(
+			"verifying ApprovalBinding = %#v; want retained %#v",
+			verifying.ApprovalBinding,
+			binding,
+		)
+	}
+
+	restartedRegistry := NewRegistry(pool)
+
+	reloaded, created, err := restartedRegistry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf(
+			"Observe() after adapter restart error = %v; want nil",
+			err,
+		)
+	}
+	if created {
+		t.Fatal(
+			"Observe() after adapter restart created = true; " +
+				"want existing active VERIFYING incident",
+		)
+	}
+	if reloaded.ID != verifying.ID {
+		t.Fatalf(
+			"reloaded ID = %q; want %q",
+			reloaded.ID,
+			verifying.ID,
+		)
+	}
+	if reloaded.State != incident.StateVerifying {
+		t.Fatalf(
+			"reloaded State = %q; want %q",
+			reloaded.State,
+			incident.StateVerifying,
+		)
+	}
+	if reloaded.Version != verifying.Version {
+		t.Fatalf(
+			"reloaded Version = %d; want %d",
+			reloaded.Version,
+			verifying.Version,
+		)
+	}
+	if reloaded.ApprovalBinding != binding {
+		t.Fatalf(
+			"reloaded ApprovalBinding = %#v; want %#v",
+			reloaded.ApprovalBinding,
+			binding,
+		)
+	}
+}

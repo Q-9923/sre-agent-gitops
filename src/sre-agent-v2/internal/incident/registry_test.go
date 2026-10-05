@@ -1502,3 +1502,295 @@ func observeDiagnosedIncidentForApprovalTest(
 
 	return diagnosed
 }
+func TestRegistryTransitionFromDiagnosedToVerifyingKeepsIncidentActive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	registry := NewMemoryRegistry()
+	observation := Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-verifying",
+			UID:       "pod-uid-verifying",
+		},
+	}
+
+	detected, created, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DETECTED -> DIAGNOSED) error = %v; want nil",
+			err,
+		)
+	}
+	if diagnosed.State != StateDiagnosed {
+		t.Fatalf(
+			"diagnosed State = %q; want %q",
+			diagnosed.State,
+			StateDiagnosed,
+		)
+	}
+
+	verifying, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              StateVerifying,
+			Actor:           "sre-agent",
+			ReasonCode:      "VERIFICATION_STARTED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DIAGNOSED -> VERIFYING) error = %v; want nil",
+			err,
+		)
+	}
+	if verifying.ID != diagnosed.ID {
+		t.Fatalf(
+			"verifying ID = %q; want %q",
+			verifying.ID,
+			diagnosed.ID,
+		)
+	}
+	if verifying.State != StateVerifying {
+		t.Fatalf(
+			"verifying State = %q; want %q",
+			verifying.State,
+			StateVerifying,
+		)
+	}
+	if verifying.Version != diagnosed.Version+1 {
+		t.Fatalf(
+			"verifying Version = %d; want %d",
+			verifying.Version,
+			diagnosed.Version+1,
+		)
+	}
+	if verifying.ApprovalBinding != (ApprovalBinding{}) {
+		t.Fatalf(
+			"verifying ApprovalBinding = %#v; want empty",
+			verifying.ApprovalBinding,
+		)
+	}
+
+	observedAgain, created, err := registry.Observe(
+		ctx,
+		observation,
+	)
+	if err != nil {
+		t.Fatalf("second Observe() error = %v; want nil", err)
+	}
+	if created {
+		t.Fatal(
+			"second Observe() created = true; " +
+				"want existing active VERIFYING incident",
+		)
+	}
+	if observedAgain.ID != verifying.ID {
+		t.Fatalf(
+			"second Observe() ID = %q; want %q",
+			observedAgain.ID,
+			verifying.ID,
+		)
+	}
+	if observedAgain.State != StateVerifying {
+		t.Fatalf(
+			"second Observe() State = %q; want %q",
+			observedAgain.State,
+			StateVerifying,
+		)
+	}
+	if observedAgain.Version != verifying.Version {
+		t.Fatalf(
+			"second Observe() Version = %d; want %d",
+			observedAgain.Version,
+			verifying.Version,
+		)
+	}
+}
+func TestRegistryTransitionFromWaitingApprovalToVerifyingKeepsBindingAndIncidentActive(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	registry := NewMemoryRegistry()
+
+	observation := Observation{
+		Source:    "prometheus",
+		Cluster:   "dev",
+		AlertName: "KubePodCrashLooping",
+		Target: Target{
+			Kind:      "Pod",
+			Namespace: "sre-agent-lab",
+			Name:      "crash-app-waiting-verification",
+			UID:       "pod-uid-waiting-verification",
+		},
+	}
+
+	detected, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("Observe() error = %v; want nil", err)
+	}
+	if !created {
+		t.Fatal("Observe() created = false; want true")
+	}
+
+	diagnosed, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      detected.ID,
+			ExpectedVersion: detected.Version,
+			To:              StateDiagnosed,
+			Actor:           "sre-agent",
+			ReasonCode:      "DIAGNOSIS_COMPLETED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DETECTED -> DIAGNOSED) error = %v; want nil",
+			err,
+		)
+	}
+
+	binding := ApprovalBinding{
+		PlanHash:  "sha256:verification-approved-plan",
+		TargetUID: observation.Target.UID,
+	}
+
+	waiting, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      diagnosed.ID,
+			ExpectedVersion: diagnosed.Version,
+			To:              StateWaitingApproval,
+			Actor:           "sre-agent",
+			ReasonCode:      "APPROVAL_REQUIRED",
+			ApprovalBinding: binding,
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(DIAGNOSED -> WAITING_APPROVAL) error = %v; want nil",
+			err,
+		)
+	}
+	if waiting.State != StateWaitingApproval {
+		t.Fatalf(
+			"waiting State = %q; want %q",
+			waiting.State,
+			StateWaitingApproval,
+		)
+	}
+	if waiting.ApprovalBinding != binding {
+		t.Fatalf(
+			"waiting ApprovalBinding = %#v; want %#v",
+			waiting.ApprovalBinding,
+			binding,
+		)
+	}
+
+	verifying, err := registry.Transition(
+		ctx,
+		TransitionCommand{
+			IncidentID:      waiting.ID,
+			ExpectedVersion: waiting.Version,
+			To:              StateVerifying,
+			Actor:           "sre-agent",
+			ReasonCode:      "APPROVAL_VALIDATED",
+		},
+	)
+	if err != nil {
+		t.Fatalf(
+			"Transition(WAITING_APPROVAL -> VERIFYING) error = %v; want nil",
+			err,
+		)
+	}
+	if verifying.State != StateVerifying {
+		t.Fatalf(
+			"verifying State = %q; want %q",
+			verifying.State,
+			StateVerifying,
+		)
+	}
+	if verifying.Version != waiting.Version+1 {
+		t.Fatalf(
+			"verifying Version = %d; want %d",
+			verifying.Version,
+			waiting.Version+1,
+		)
+	}
+	if verifying.ApprovalBinding != binding {
+		t.Fatalf(
+			"verifying ApprovalBinding = %#v; want retained %#v",
+			verifying.ApprovalBinding,
+			binding,
+		)
+	}
+
+	observedAgain, created, err := registry.Observe(ctx, observation)
+	if err != nil {
+		t.Fatalf("second Observe() error = %v; want nil", err)
+	}
+	if created {
+		t.Fatal(
+			"second Observe() created = true; " +
+				"want existing active VERIFYING incident",
+		)
+	}
+	if observedAgain.ID != verifying.ID {
+		t.Fatalf(
+			"second Observe() ID = %q; want %q",
+			observedAgain.ID,
+			verifying.ID,
+		)
+	}
+	if observedAgain.State != StateVerifying {
+		t.Fatalf(
+			"second Observe() State = %q; want %q",
+			observedAgain.State,
+			StateVerifying,
+		)
+	}
+	if observedAgain.Version != verifying.Version {
+		t.Fatalf(
+			"second Observe() Version = %d; want %d",
+			observedAgain.Version,
+			verifying.Version,
+		)
+	}
+	if observedAgain.ApprovalBinding != binding {
+		t.Fatalf(
+			"second Observe() ApprovalBinding = %#v; want %#v",
+			observedAgain.ApprovalBinding,
+			binding,
+		)
+	}
+}

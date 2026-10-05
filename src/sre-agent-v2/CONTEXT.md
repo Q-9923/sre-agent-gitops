@@ -77,6 +77,10 @@ _Avoid_: Action Result
 Verification 所观察的稳定工作负载身份，包含集群、命名空间、资源类型、名称和 UID；它与 Action Key 中被执行动作的原始目标 UID 不同，替代 Pod 的 UID 变化不得改变 Verification Subject。
 _Avoid_: Action Target, Evidence
 
+**Verifying Incident**:
+正在针对稳定 Verification Subject 进行独立恢复验证的活跃 Incident；Action Attempt 的执行结果不能代替其恢复结论。
+_Avoid_: Resolved Incident, Action Attempt Status
+
 **Verification Status**:
 Verification 的生命周期状态；`PENDING` 表示等待独立证据，`RECOVERED`、`NOT_RECOVERED` 和 `INCONCLUSIVE` 是不可变终态。
 _Avoid_: Action Attempt Status

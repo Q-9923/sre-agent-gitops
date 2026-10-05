@@ -16,6 +16,7 @@ const (
 	StateDetected        State = "DETECTED"
 	StateDiagnosed       State = "DIAGNOSED"
 	StateWaitingApproval State = "WAITING_APPROVAL"
+	StateVerifying       State = "VERIFYING"
 	StateResolved        State = "RESOLVED"
 )
 
@@ -322,7 +323,10 @@ func (registry *Registry) Transition(
 			command.To == StateResolved)) ||
 		(current.State == StateDiagnosed &&
 			(command.To == StateWaitingApproval ||
-				command.To == StateResolved))
+				command.To == StateVerifying ||
+				command.To == StateResolved)) ||
+		(current.State == StateWaitingApproval &&
+			command.To == StateVerifying)
 	if !validTransition {
 		return Incident{}, fmt.Errorf(
 			"%w: from %q to %q",

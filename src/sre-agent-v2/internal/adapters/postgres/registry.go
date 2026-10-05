@@ -446,29 +446,45 @@ SET
             THEN statement_timestamp()
         ELSE NULL
     END,
-    approval_plan_hash = CASE
-        WHEN $1 = 'WAITING_APPROVAL'
-            THEN $4
-        ELSE NULL
-    END,
-    approval_target_uid = CASE
-        WHEN $1 = 'WAITING_APPROVAL'
-            THEN $5
-        ELSE NULL
-    END
+approval_plan_hash = CASE
+    WHEN $1 = 'WAITING_APPROVAL'
+        THEN $4
+    WHEN $1 = 'VERIFYING'
+        THEN updated.approval_plan_hash
+    ELSE NULL
+END,
+approval_target_uid = CASE
+    WHEN $1 = 'WAITING_APPROVAL'
+        THEN $5
+    WHEN $1 = 'VERIFYING'
+        THEN updated.approval_target_uid
+    ELSE NULL
+END
 FROM current
 WHERE updated.id = current.id
-  AND (
-      (
-          current.state = 'DETECTED'
-          AND $1 IN ('DIAGNOSED', 'RESOLVED')
-      )
-      OR
-      (
-          current.state = 'DIAGNOSED'
-          AND $1 IN ('WAITING_APPROVAL', 'RESOLVED')
-      )
-  )
+AND (
+    (
+        current.state = 'DETECTED'
+        AND $1 IN (
+            'DIAGNOSED',
+            'RESOLVED'
+        )
+    )
+    OR
+    (
+        current.state = 'DIAGNOSED'
+        AND $1 IN (
+            'WAITING_APPROVAL',
+            'VERIFYING',
+            'RESOLVED'
+        )
+    )
+    OR
+    (
+        current.state = 'WAITING_APPROVAL'
+        AND $1 = 'VERIFYING'
+    )
+)
 RETURNING
     updated.id,
     updated.state,
