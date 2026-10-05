@@ -26,6 +26,13 @@ var (
 	ErrVersionConflict    = errors.New("incident version conflict")
 	ErrLeaseHeld          = errors.New("incident lease is held")
 	ErrInvalidClaim       = errors.New("invalid incident claim")
+	ErrInvalidResolution  = errors.New(
+		"invalid incident resolution",
+	)
+	ErrRecoveryEvidenceUnavailable = errors.New(
+		"recovery evidence store unavailable",
+	)
+	ErrIncidentNotFound = errors.New("incident not found")
 )
 
 type Target struct {
@@ -48,12 +55,12 @@ type ApprovalBinding struct {
 }
 
 type Incident struct {
-	ID              string
-	State           State
-	Version         uint64
-	ApprovalBinding ApprovalBinding
-
-	idempotencyKey string
+	ID                       string
+	State                    State
+	Version                  uint64
+	ApprovalBinding          ApprovalBinding
+	ResolutionVerificationID string
+	idempotencyKey           string
 }
 
 type TransitionCommand struct {
@@ -71,6 +78,54 @@ type ClaimCommand struct {
 	HolderID        string
 	Now             time.Time
 	LeaseDuration   time.Duration
+}
+
+type RecoveryEvidenceStore interface {
+	RequireRecovered(
+		context.Context,
+		string,
+		string,
+	) error
+}
+
+type ResolveCommand struct {
+	IncidentID      string
+	ExpectedVersion uint64
+	VerificationID  string
+	Actor           string
+	ReasonCode      string
+}
+
+func (command ResolveCommand) Validate() error {
+	switch {
+	case strings.TrimSpace(command.IncidentID) == "":
+		return fmt.Errorf(
+			"%w: incident ID is required",
+			ErrInvalidResolution,
+		)
+	case command.ExpectedVersion == 0:
+		return fmt.Errorf(
+			"%w: expected version must be positive",
+			ErrInvalidResolution,
+		)
+	case strings.TrimSpace(command.VerificationID) == "":
+		return fmt.Errorf(
+			"%w: verification ID is required",
+			ErrInvalidResolution,
+		)
+	case strings.TrimSpace(command.Actor) == "":
+		return fmt.Errorf(
+			"%w: actor is required",
+			ErrInvalidResolution,
+		)
+	case strings.TrimSpace(command.ReasonCode) == "":
+		return fmt.Errorf(
+			"%w: reason code is required",
+			ErrInvalidResolution,
+		)
+	default:
+		return nil
+	}
 }
 
 func (command ClaimCommand) Validate() error {
@@ -144,13 +199,22 @@ func (observation Observation) IdempotencyKey() (string, error) {
 }
 
 type Registry struct {
-	mu sync.Mutex
-
+	mu                       sync.Mutex
+	recoveryEvidenceStore    RecoveryEvidenceStore
 	activeByKey              map[string]string
 	incidentsByID            map[string]Incident
 	claimsByIncidentID       map[string]Claim
 	claimHistoryByIncidentID map[string][]ClaimAuditEvent
 	nextSequence             uint64
+}
+
+func NewRegistryWithRecoveryEvidenceStore(
+	store RecoveryEvidenceStore,
+) *Registry {
+	registry := NewMemoryRegistry()
+	registry.recoveryEvidenceStore = store
+
+	return registry
 }
 
 func NewMemoryRegistry() *Registry {
@@ -351,6 +415,84 @@ func (registry *Registry) Transition(
 			current.idempotencyKey,
 		)
 	}
+
+	return current, nil
+}
+
+func (registry *Registry) Resolve(
+	ctx context.Context,
+	command ResolveCommand,
+) (Incident, error) {
+	if err := ctx.Err(); err != nil {
+		return Incident{}, err
+	}
+
+	if err := command.Validate(); err != nil {
+		return Incident{}, err
+	}
+
+	if registry.recoveryEvidenceStore == nil {
+		return Incident{}, fmt.Errorf(
+			"%w: resolving incident %q requires persisted recovery evidence",
+			ErrRecoveryEvidenceUnavailable,
+			command.IncidentID,
+		)
+	}
+
+	if err := registry.recoveryEvidenceStore.RequireRecovered(
+		ctx,
+		command.VerificationID,
+		command.IncidentID,
+	); err != nil {
+		return Incident{}, fmt.Errorf(
+			"validate recovery evidence for incident %q: %w",
+			command.IncidentID,
+			err,
+		)
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return Incident{}, err
+	}
+
+	current, exists := registry.incidentsByID[command.IncidentID]
+	if !exists {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q",
+			ErrIncidentNotFound,
+			command.IncidentID,
+		)
+	}
+
+	if current.Version != command.ExpectedVersion {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q current=%d expected=%d",
+			ErrVersionConflict,
+			command.IncidentID,
+			current.Version,
+			command.ExpectedVersion,
+		)
+	}
+
+	if current.State != StateVerifying {
+		return Incident{}, fmt.Errorf(
+			"%w: from %q to %q",
+			ErrInvalidTransition,
+			current.State,
+			StateResolved,
+		)
+	}
+
+	current.State = StateResolved
+	current.Version++
+	current.ResolutionVerificationID = command.VerificationID
+	current.ApprovalBinding = ApprovalBinding{}
+
+	registry.incidentsByID[current.ID] = current
+	delete(registry.activeByKey, current.idempotencyKey)
 
 	return current, nil
 }

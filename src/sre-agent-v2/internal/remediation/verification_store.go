@@ -20,6 +20,9 @@ var (
 	ErrVerificationSubjectConflict = errors.New(
 		"verification subject conflict",
 	)
+	ErrVerificationNotRecovered = errors.New(
+		"verification is not recovered",
+	)
 )
 
 type VerificationStatus string
@@ -195,6 +198,60 @@ func NewMemoryVerificationStore() *MemoryVerificationStore {
 	return &MemoryVerificationStore{
 		verifications: make(map[ActionKey]Verification),
 	}
+}
+
+func (store *MemoryVerificationStore) RequireRecovered(
+	ctx context.Context,
+	verificationID string,
+	incidentID string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(verificationID) == "" ||
+		strings.TrimSpace(incidentID) == "" {
+		return ErrInvalidVerification
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	for _, verification := range store.verifications {
+		if verification.ID != verificationID {
+			continue
+		}
+
+		if verification.ActionKey.IncidentID != incidentID {
+			return fmt.Errorf(
+				"%w: verification %q does not belong to incident %q",
+				ErrVerificationNotFound,
+				verificationID,
+				incidentID,
+			)
+		}
+
+		if verification.Status != VerificationStatusRecovered {
+			return fmt.Errorf(
+				"%w: verification %q status=%q",
+				ErrVerificationNotRecovered,
+				verificationID,
+				verification.Status,
+			)
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf(
+		"%w: verification %q",
+		ErrVerificationNotFound,
+		verificationID,
+	)
 }
 
 func (store *MemoryVerificationStore) Begin(
