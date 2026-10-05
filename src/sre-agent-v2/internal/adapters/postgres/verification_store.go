@@ -24,7 +24,6 @@ func NewVerificationStore(pool *pgxpool.Pool) *VerificationStore {
 		pool: pool,
 	}
 }
-
 func (store *VerificationStore) Begin(
 	ctx context.Context,
 	command remediationdomain.BeginVerificationCommand,
@@ -46,6 +45,11 @@ func (store *VerificationStore) Begin(
 			INSERT INTO verifications (
 				id,
 				action_attempt_id,
+				subject_cluster,
+				subject_namespace,
+				subject_kind,
+				subject_name,
+				subject_uid,
 				status,
 				version,
 				started_at,
@@ -58,6 +62,11 @@ func (store *VerificationStore) Begin(
 				$3,
 				$4,
 				$5,
+				$6,
+				$7,
+				$8,
+				$9,
+				$10,
 				NULL,
 				NULL
 			)
@@ -66,6 +75,11 @@ func (store *VerificationStore) Begin(
 		`,
 		candidate.ID,
 		candidate.ActionAttemptID,
+		candidate.Subject.Cluster,
+		candidate.Subject.Namespace,
+		candidate.Subject.Kind,
+		candidate.Subject.Name,
+		candidate.Subject.UID,
 		candidate.Status,
 		candidate.Version,
 		candidate.StartedAt,
@@ -88,9 +102,16 @@ func (store *VerificationStore) Begin(
 		return remediationdomain.Verification{}, false, err
 	}
 
+	if existing.Subject != command.Subject {
+		return remediationdomain.Verification{}, false, fmt.Errorf(
+			"%w: action attempt %q is already bound to another subject",
+			remediationdomain.ErrVerificationSubjectConflict,
+			command.ActionAttempt.ID,
+		)
+	}
+
 	return existing, false, nil
 }
-
 func (store *VerificationStore) Complete(
 	ctx context.Context,
 	command remediationdomain.CompleteVerificationCommand,
@@ -228,6 +249,11 @@ func (store *VerificationStore) lookupByActionAttemptID(
 				action_attempt.incident_id,
 				action_attempt.plan_hash,
 				action_attempt.target_uid,
+				verification.subject_cluster,
+				verification.subject_namespace,
+				verification.subject_kind,
+				verification.subject_name,
+				verification.subject_uid,
 				verification.status,
 				verification.version,
 				verification.started_at,
@@ -273,6 +299,11 @@ func lookupVerificationByActionKeyForUpdate(
 				action_attempt.incident_id,
 				action_attempt.plan_hash,
 				action_attempt.target_uid,
+				verification.subject_cluster,
+				verification.subject_namespace,
+				verification.subject_kind,
+				verification.subject_name,
+				verification.subject_uid,
 				verification.status,
 				verification.version,
 				verification.started_at,
@@ -330,6 +361,11 @@ func scanVerification(
 		&verification.ActionKey.IncidentID,
 		&verification.ActionKey.PlanHash,
 		&verification.ActionKey.TargetUID,
+		&verification.Subject.Cluster,
+		&verification.Subject.Namespace,
+		&verification.Subject.Kind,
+		&verification.Subject.Name,
+		&verification.Subject.UID,
 		&status,
 		&verification.Version,
 		&startedAt,
@@ -350,7 +386,6 @@ func scanVerification(
 
 	return verification, nil
 }
-
 func validateVerificationCompletionCommand(
 	command remediationdomain.CompleteVerificationCommand,
 ) error {

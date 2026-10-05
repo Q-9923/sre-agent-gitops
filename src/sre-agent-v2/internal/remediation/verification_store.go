@@ -17,6 +17,9 @@ var (
 	ErrInvalidVerificationTransition = errors.New(
 		"invalid verification transition",
 	)
+	ErrVerificationSubjectConflict = errors.New(
+		"verification subject conflict",
+	)
 )
 
 type VerificationStatus string
@@ -31,11 +34,52 @@ const (
 	VerificationStatusInconclusive VerificationStatus = "INCONCLUSIVE"
 )
 
+type VerificationSubject struct {
+	Cluster   string
+	Namespace string
+	Kind      string
+	Name      string
+	UID       string
+}
+
+func (subject VerificationSubject) Validate() error {
+	switch {
+	case strings.TrimSpace(subject.Cluster) == "":
+		return fmt.Errorf(
+			"%w: verification subject cluster is required",
+			ErrInvalidVerification,
+		)
+	case strings.TrimSpace(subject.Namespace) == "":
+		return fmt.Errorf(
+			"%w: verification subject namespace is required",
+			ErrInvalidVerification,
+		)
+	case strings.TrimSpace(subject.Kind) == "":
+		return fmt.Errorf(
+			"%w: verification subject kind is required",
+			ErrInvalidVerification,
+		)
+	case strings.TrimSpace(subject.Name) == "":
+		return fmt.Errorf(
+			"%w: verification subject name is required",
+			ErrInvalidVerification,
+		)
+	case strings.TrimSpace(subject.UID) == "":
+		return fmt.Errorf(
+			"%w: verification subject UID is required",
+			ErrInvalidVerification,
+		)
+	default:
+		return nil
+	}
+}
+
 type Verification struct {
 	ID              string
 	ActionAttemptID string
 	ActionKey       ActionKey
 	Status          VerificationStatus
+	Subject         VerificationSubject
 	Version         int64
 	StartedAt       time.Time
 	FinishedAt      *time.Time
@@ -44,6 +88,7 @@ type Verification struct {
 
 type BeginVerificationCommand struct {
 	ActionAttempt ActionAttempt
+	Subject       VerificationSubject
 	StartedAt     time.Time
 }
 
@@ -73,6 +118,10 @@ func (command BeginVerificationCommand) Validate() error {
 		return ErrInvalidVerification
 	}
 
+	if err := command.Subject.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -91,6 +140,7 @@ func NewVerification(
 		),
 		ActionAttemptID: command.ActionAttempt.ID,
 		ActionKey:       actionKey,
+		Subject:         command.Subject,
 		Status:          VerificationStatusPending,
 		Version:         1,
 		StartedAt:       command.StartedAt,
@@ -177,6 +227,14 @@ func (store *MemoryVerificationStore) Begin(
 
 	existing, exists := store.verifications[actionKey]
 	if exists {
+		if existing.Subject != command.Subject {
+			return Verification{}, false, fmt.Errorf(
+				"%w: action attempt %q is already bound to another subject",
+				ErrVerificationSubjectConflict,
+				command.ActionAttempt.ID,
+			)
+		}
+
 		return cloneVerification(existing), false, nil
 	}
 

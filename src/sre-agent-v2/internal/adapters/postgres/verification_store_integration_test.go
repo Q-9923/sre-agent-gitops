@@ -51,8 +51,11 @@ func TestVerificationStoreBeginSurvivesAdapterRestartPostgreSQL(
 		t.Fatalf("ActionAttempt Complete() error = %v", err)
 	}
 
+	subject := postgresTestVerificationSubject()
+
 	command := remediationdomain.BeginVerificationCommand{
 		ActionAttempt: succeededAttempt,
+		Subject:       subject,
 		StartedAt:     actionFinishedAt.Add(time.Second),
 	}
 
@@ -64,6 +67,13 @@ func TestVerificationStoreBeginSurvivesAdapterRestartPostgreSQL(
 	}
 	if !created {
 		t.Fatal("first Verification Begin() created = false; want true")
+	}
+	if first.Subject != subject {
+		t.Fatalf(
+			"first Verification Subject = %#v; want %#v",
+			first.Subject,
+			subject,
+		)
 	}
 	if first.Status != remediationdomain.VerificationStatusPending {
 		t.Fatalf(
@@ -110,6 +120,13 @@ func TestVerificationStoreBeginSurvivesAdapterRestartPostgreSQL(
 			first.ActionKey,
 		)
 	}
+	if second.Subject != subject {
+		t.Fatalf(
+			"second Verification Subject = %#v; want %#v",
+			second.Subject,
+			subject,
+		)
+	}
 	if second.Status != first.Status {
 		t.Fatalf(
 			"second Status = %q; want %q",
@@ -144,7 +161,31 @@ func TestVerificationStoreBeginSurvivesAdapterRestartPostgreSQL(
 			first.EvidenceCode,
 		)
 	}
+
+	conflictCommand := command
+	conflictCommand.Subject.UID = "deployment-uid-rebound"
+
+	_, created, err = restartedStore.Begin(
+		ctx,
+		conflictCommand,
+	)
+	if !errors.Is(
+		err,
+		remediationdomain.ErrVerificationSubjectConflict,
+	) {
+		t.Fatalf(
+			"subject rebinding Verification Begin() error = %v; "+
+				"want ErrVerificationSubjectConflict",
+			err,
+		)
+	}
+	if created {
+		t.Fatal(
+			"subject rebinding Verification Begin() created = true; want false",
+		)
+	}
 }
+
 func TestVerificationStoreCompletionSurvivesAdapterRestartPostgreSQL(
 
 	t *testing.T,
@@ -189,6 +230,7 @@ func TestVerificationStoreCompletionSurvivesAdapterRestartPostgreSQL(
 	beginVerificationCommand :=
 		remediationdomain.BeginVerificationCommand{
 			ActionAttempt: succeededAttempt,
+			Subject:       postgresTestVerificationSubject(),
 			StartedAt:     actionFinishedAt.Add(time.Second),
 		}
 
@@ -399,6 +441,7 @@ func TestVerificationStoreConcurrentCompletionAllowsOneOutcomePostgreSQL(
 		ctx,
 		remediationdomain.BeginVerificationCommand{
 			ActionAttempt: succeededAttempt,
+			Subject:       postgresTestVerificationSubject(),
 			StartedAt:     verificationStartedAt,
 		},
 	)
@@ -512,6 +555,7 @@ func TestVerificationStoreConcurrentCompletionAllowsOneOutcomePostgreSQL(
 		ctx,
 		remediationdomain.BeginVerificationCommand{
 			ActionAttempt: succeededAttempt,
+			Subject:       postgresTestVerificationSubject(),
 			StartedAt:     verificationStartedAt,
 		},
 	)
@@ -546,5 +590,15 @@ func TestVerificationStoreConcurrentCompletionAllowsOneOutcomePostgreSQL(
 			reloaded.EvidenceCode,
 			winner.EvidenceCode,
 		)
+	}
+}
+
+func postgresTestVerificationSubject() remediationdomain.VerificationSubject {
+	return remediationdomain.VerificationSubject{
+		Cluster:   "dev",
+		Namespace: "default",
+		Kind:      "Deployment",
+		Name:      "crash-app",
+		UID:       "deployment-uid-crash-app",
 	}
 }

@@ -73,6 +73,10 @@ _Avoid_: Incident State, Verification
 独立于 Action Attempt 结果、针对同一动作执行的有界恢复检查；不得根据 Kubernetes 请求结果推断目标已经恢复。
 _Avoid_: Action Result
 
+**Verification Subject**:
+Verification 所观察的稳定工作负载身份，包含集群、命名空间、资源类型、名称和 UID；它与 Action Key 中被执行动作的原始目标 UID 不同，替代 Pod 的 UID 变化不得改变 Verification Subject。
+_Avoid_: Action Target, Evidence
+
 **Verification Status**:
 Verification 的生命周期状态；`PENDING` 表示等待独立证据，`RECOVERED`、`NOT_RECOVERED` 和 `INCONCLUSIVE` 是不可变终态。
 _Avoid_: Action Attempt Status
