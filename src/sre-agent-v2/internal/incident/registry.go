@@ -199,13 +199,14 @@ func (observation Observation) IdempotencyKey() (string, error) {
 }
 
 type Registry struct {
-	mu                       sync.Mutex
-	recoveryEvidenceStore    RecoveryEvidenceStore
-	activeByKey              map[string]string
-	incidentsByID            map[string]Incident
-	claimsByIncidentID       map[string]Claim
-	claimHistoryByIncidentID map[string][]ClaimAuditEvent
-	nextSequence             uint64
+	mu                         sync.Mutex
+	recoveryEvidenceStore      RecoveryEvidenceStore
+	verificationLifecycleStore VerificationLifecycleStore
+	activeByKey                map[string]string
+	incidentsByID              map[string]Incident
+	claimsByIncidentID         map[string]Claim
+	claimHistoryByIncidentID   map[string][]ClaimAuditEvent
+	nextSequence               uint64
 }
 
 func NewRegistryWithRecoveryEvidenceStore(

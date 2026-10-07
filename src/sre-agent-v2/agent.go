@@ -30,21 +30,23 @@ type decisionSource interface {
 }
 
 type sreAgent struct {
-	config              agentConfig
-	kubernetes          kubernetes.Interface
-	collector           podContextSource
-	prometheus          firingAlertSource
-	ollama              decisionSource
-	incidents           incidentRegistry
-	memory              remediationStateStore
-	approvals           approvaldomain.Store
-	plans               approvaldomain.PlanStore
-	actionAttempts      remediationdomain.ActionAttemptStore
-	logger              *slog.Logger
-	now                 func() time.Time
-	markCycleProgress   func()
-	markSuccessfulCycle func()
-	recordCycleResult   func(string)
+	config                agentConfig
+	kubernetes            kubernetes.Interface
+	collector             podContextSource
+	prometheus            firingAlertSource
+	ollama                decisionSource
+	incidents             incidentRegistry
+	memory                remediationStateStore
+	approvals             approvaldomain.Store
+	plans                 approvaldomain.PlanStore
+	actionAttempts        remediationdomain.ActionAttemptStore
+	verifications         remediationdomain.VerificationStore
+	verificationLifecycle incidentVerificationLifecycle
+	logger                *slog.Logger
+	now                   func() time.Time
+	markCycleProgress     func()
+	markSuccessfulCycle   func()
+	recordCycleResult     func(string)
 }
 
 func newSREAgent(
@@ -783,11 +785,15 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		)
 		return
 	}
+	verificationSubject := verificationSubjectForPod(
+		podEvidence,
+	)
 
 	actionAttempt, shouldExecute := agent.beginActionAttempt(
 		ctx,
 		currentIncident,
 		approvalCheck.Plan,
+		verificationSubject,
 		targetLabel,
 	)
 	if !shouldExecute {
@@ -805,13 +811,28 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 	)
 	cancelAction()
 
-	if !agent.completeActionAttempt(
+	completedAttempt, completed :=
+		agent.completeActionAttempt(
+			ctx,
+			actionAttempt,
+			decision.Action,
+			targetLabel,
+			err,
+		)
+	if !completed {
+		return
+	}
+
+	_, verifying := agent.beginVerification(
 		ctx,
-		actionAttempt,
+		currentIncident,
+		completedAttempt,
+		completedAttempt.Key.FencingToken,
+		verificationSubject,
 		decision.Action,
 		targetLabel,
-		err,
-	) {
+	)
+	if !verifying {
 		return
 	}
 
@@ -821,6 +842,8 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 			"incident_id", incidentID,
 			"action", decision.Action,
 			"target", targetLabel,
+			"attempt_id", completedAttempt.ID,
+			"verification_state", "PENDING",
 			"result", "ERROR",
 			"error_code", "KUBERNETES_ACTION_FAILED",
 			"error", err,
@@ -833,9 +856,10 @@ func (agent *sreAgent) handlePodCrashLooping(ctx context.Context, alert Alert) {
 		"incident_id", incidentID,
 		"action", decision.Action,
 		"target", targetLabel,
-		"attempt_id", actionAttempt.ID,
+		"attempt_id", completedAttempt.ID,
 		"fencing_token",
-		actionAttempt.Key.FencingToken,
+		completedAttempt.Key.FencingToken,
+		"verification_state", "PENDING",
 		"result", "SUBMITTED",
 		"error_code", "",
 	)

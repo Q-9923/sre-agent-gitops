@@ -113,14 +113,16 @@ func TestHandlePodCrashLoopingResumesWaitingApprovalWithoutRediagnosis(
 	}
 
 	current := harness.currentIncident(t)
-	if current.State != incident.StateWaitingApproval {
+
+	if current.State != incident.StateVerifying {
 		t.Fatalf(
-			"Incident State after submission = %q; want %q until execution receipt exists",
+			"Incident State after submission = %q; "+
+				"want %q after terminal Action Attempt "+
+				"and pending Verification",
 			current.State,
-			incident.StateWaitingApproval,
+			incident.StateVerifying,
 		)
 	}
-
 	logOutput := harness.logs.String()
 	if !strings.Contains(
 		logOutput,

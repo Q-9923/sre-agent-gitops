@@ -19,6 +19,7 @@ func (agent *sreAgent) beginActionAttempt(
 	ctx context.Context,
 	currentIncident incident.Incident,
 	plan approvaldomain.Plan,
+	verificationSubject remediationdomain.VerificationSubject,
 	targetLabel string,
 ) (remediationdomain.ActionAttempt, bool) {
 	startedAt := agent.now()
@@ -230,7 +231,36 @@ func (agent *sreAgent) beginActionAttempt(
 				actionAttemptPreviousExecutorLost,
 			)
 
+			_, verifying := agent.beginVerification(
+				ctx,
+				actionClaim.Incident,
+				recovered,
+				executionKey.FencingToken,
+				verificationSubject,
+				plan.Action,
+				targetLabel,
+			)
+			if !verifying {
+				return recovered, false
+			}
+
 			return recovered, false
+		}
+
+		if attempt.Status !=
+			remediationdomain.ActionAttemptStatusStarted {
+			_, verifying := agent.beginVerification(
+				ctx,
+				actionClaim.Incident,
+				attempt,
+				executionKey.FencingToken,
+				verificationSubject,
+				plan.Action,
+				targetLabel,
+			)
+			if !verifying {
+				return attempt, false
+			}
 		}
 
 		agent.logger.Info(
@@ -253,7 +283,6 @@ func (agent *sreAgent) beginActionAttempt(
 
 		return attempt, false
 	}
-
 	agent.logger.Info(
 		"action_attempt_started",
 		"incident_id", currentIncident.ID,
@@ -279,17 +308,15 @@ func (agent *sreAgent) completeActionAttempt(
 	action string,
 	targetLabel string,
 	actionErr error,
-) bool {
+) (remediationdomain.ActionAttempt, bool) {
 	startedAt := agent.now()
 
-	status := remediationdomain.
-		ActionAttemptStatusSucceeded
+	status := remediationdomain.ActionAttemptStatusSucceeded
 	result := "SUCCEEDED"
 	errorCode := ""
 
 	if actionErr != nil {
-		status = remediationdomain.
-			ActionAttemptStatusFailed
+		status = remediationdomain.ActionAttemptStatusFailed
 		result = "FAILED"
 		errorCode = "KUBERNETES_ACTION_FAILED"
 	}
@@ -303,8 +330,7 @@ func (agent *sreAgent) completeActionAttempt(
 			"target", targetLabel,
 			"target_uid", attempt.Key.TargetUID,
 			"plan_hash", attempt.Key.PlanHash,
-			"fencing_token",
-			attempt.Key.FencingToken,
+			"fencing_token", attempt.Key.FencingToken,
 			"attempt_version", attempt.Version,
 			"action_result", result,
 			"result", "ERROR",
@@ -316,7 +342,7 @@ func (agent *sreAgent) completeActionAttempt(
 			"action attempt store is not configured",
 		)
 
-		return false
+		return remediationdomain.ActionAttempt{}, false
 	}
 
 	resultContext, cancelResult := context.WithTimeout(
@@ -337,7 +363,7 @@ func (agent *sreAgent) completeActionAttempt(
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return false
+			return remediationdomain.ActionAttempt{}, false
 		}
 
 		agent.logger.Error(
@@ -348,8 +374,7 @@ func (agent *sreAgent) completeActionAttempt(
 			"target", targetLabel,
 			"target_uid", attempt.Key.TargetUID,
 			"plan_hash", attempt.Key.PlanHash,
-			"fencing_token",
-			attempt.Key.FencingToken,
+			"fencing_token", attempt.Key.FencingToken,
 			"attempt_version", attempt.Version,
 			"action_result", result,
 			"action_error_code", errorCode,
@@ -361,7 +386,7 @@ func (agent *sreAgent) completeActionAttempt(
 			"error", err,
 		)
 
-		return false
+		return remediationdomain.ActionAttempt{}, false
 	}
 
 	agent.logger.Info(
@@ -372,8 +397,7 @@ func (agent *sreAgent) completeActionAttempt(
 		"target", targetLabel,
 		"target_uid", completed.Key.TargetUID,
 		"plan_hash", completed.Key.PlanHash,
-		"fencing_token",
-		completed.Key.FencingToken,
+		"fencing_token", completed.Key.FencingToken,
 		"attempt_status", completed.Status,
 		"attempt_version", completed.Version,
 		"result", result,
@@ -382,5 +406,5 @@ func (agent *sreAgent) completeActionAttempt(
 		"error_code", errorCode,
 	)
 
-	return true
+	return completed, true
 }

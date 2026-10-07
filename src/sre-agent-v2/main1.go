@@ -105,7 +105,7 @@ func main() {
 	)
 	agent.plans = incidentHandle.Plans
 	agent.actionAttempts = incidentHandle.ActionAttempts
-
+	agent.verifications = incidentHandle.Verifications
 	applicationErr := runApplication(
 		ctx,
 		healthListener,
@@ -113,6 +113,8 @@ func main() {
 		operationalHandler,
 	)
 	incidentHandle.Close()
+	agent.verificationLifecycle =
+		incidentHandle.VerificationLifecycle
 
 	if applicationErr != nil {
 		logger.Error(

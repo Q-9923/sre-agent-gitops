@@ -165,11 +165,15 @@ func (agent *sreAgent) resumeWaitingApproval(
 		)
 		return
 	}
+	verificationSubject := verificationSubjectForPod(
+		podEvidence,
+	)
 
 	actionAttempt, shouldExecute := agent.beginActionAttempt(
 		ctx,
 		currentIncident,
 		plan,
+		verificationSubject,
 		targetLabel,
 	)
 	if !shouldExecute {
@@ -199,16 +203,30 @@ func (agent *sreAgent) resumeWaitingApproval(
 	)
 	cancelAction()
 
-	if !agent.completeActionAttempt(
-		ctx,
-		actionAttempt,
-		plan.Action,
-		targetLabel,
-		err,
-	) {
+	completedAttempt, completed :=
+		agent.completeActionAttempt(
+			ctx,
+			actionAttempt,
+			plan.Action,
+			targetLabel,
+			err,
+		)
+	if !completed {
 		return
 	}
 
+	_, verifying := agent.beginVerification(
+		ctx,
+		currentIncident,
+		completedAttempt,
+		completedAttempt.Key.FencingToken,
+		verificationSubject,
+		plan.Action,
+		targetLabel,
+	)
+	if !verifying {
+		return
+	}
 	if err != nil {
 		agent.logger.Error(
 			"remediation_failed",
@@ -227,9 +245,9 @@ func (agent *sreAgent) resumeWaitingApproval(
 		"incident_id", remediationIncidentID,
 		"action", plan.Action,
 		"target", targetLabel,
-		"attempt_id", actionAttempt.ID,
-		"fencing_token",
-		actionAttempt.Key.FencingToken,
+		"attempt_id", completedAttempt.ID,
+		"fencing_token", completedAttempt.Key.FencingToken,
+		"verification_state", "PENDING",
 		"result", "SUBMITTED",
 		"error_code", "",
 	)

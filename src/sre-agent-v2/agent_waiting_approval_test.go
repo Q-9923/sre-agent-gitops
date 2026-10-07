@@ -335,18 +335,19 @@ func TestHandlePodCrashLoopingDoesNotWaitWhenPolicyRejectsCandidate(
 }
 
 type waitingApprovalHarness struct {
-	now              time.Time
-	alert            Alert
-	evidence         PodEvidence
-	decision         Decision
-	observation      incident.Observation
-	registry         *incident.Registry
-	observedIncident incident.Incident
-	plan             approval.Plan
-	approvalStore    *approval.MemoryStore
-	stateStore       *waitingApprovalStateStore
-	kubernetesClient *fake.Clientset
-	logs             bytes.Buffer
+	now               time.Time
+	alert             Alert
+	evidence          PodEvidence
+	decision          Decision
+	observation       incident.Observation
+	registry          *incident.Registry
+	observedIncident  incident.Incident
+	plan              approval.Plan
+	approvalStore     *approval.MemoryStore
+	stateStore        *waitingApprovalStateStore
+	kubernetesClient  *fake.Clientset
+	logs              bytes.Buffer
+	verificationStore *remediationdomain.MemoryVerificationStore
 }
 
 func newWaitingApprovalHarness(
@@ -458,17 +459,18 @@ func newWaitingApprovalHarness(
 	)
 
 	return &waitingApprovalHarness{
-		now:              now,
-		alert:            alert,
-		evidence:         evidence,
-		decision:         decision,
-		observation:      observation,
-		registry:         registry,
-		observedIncident: observedIncident,
-		plan:             plan,
-		approvalStore:    approval.NewMemoryStore(),
-		stateStore:       &waitingApprovalStateStore{},
-		kubernetesClient: kubernetesClient,
+		now:               now,
+		alert:             alert,
+		evidence:          evidence,
+		decision:          decision,
+		observation:       observation,
+		registry:          registry,
+		observedIncident:  observedIncident,
+		plan:              plan,
+		approvalStore:     approval.NewMemoryStore(),
+		verificationStore: remediationdomain.NewMemoryVerificationStore(),
+		stateStore:        &waitingApprovalStateStore{},
+		kubernetesClient:  kubernetesClient,
 	}
 }
 
@@ -521,8 +523,13 @@ func (harness *waitingApprovalHarness) newAgent(
 		ollama: &stubDecisionSource{
 			decision: harness.decision,
 		},
-		incidents:      registry,
-		approvals:      approvalStore,
+		incidents:     registry,
+		approvals:     approvalStore,
+		verifications: harness.verificationStore,
+		verificationLifecycle: &agentVerificationLifecycleAdapter{
+			registry: registry,
+			store:    harness.verificationStore,
+		},
 		plans:          approval.NewMemoryPlanStore(),
 		actionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
 		memory:         harness.stateStore,

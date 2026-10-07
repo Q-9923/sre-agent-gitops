@@ -24,94 +24,18 @@ func NewVerificationStore(pool *pgxpool.Pool) *VerificationStore {
 		pool: pool,
 	}
 }
+
 func (store *VerificationStore) Begin(
 	ctx context.Context,
 	command remediationdomain.BeginVerificationCommand,
 ) (remediationdomain.Verification, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return remediationdomain.Verification{}, false, err
-	}
-
-	candidate, err := remediationdomain.NewVerification(command)
-	if err != nil {
-		return remediationdomain.Verification{}, false, err
-	}
-
-	var insertedID string
-
-	err = store.pool.QueryRow(
+	return beginVerificationWithQuerier(
 		ctx,
-		`
-			INSERT INTO verifications (
-				id,
-				action_attempt_id,
-				subject_cluster,
-				subject_namespace,
-				subject_kind,
-				subject_name,
-				subject_uid,
-				status,
-				version,
-				started_at,
-				finished_at,
-				evidence_code
-			)
-			VALUES (
-				$1,
-				$2,
-				$3,
-				$4,
-				$5,
-				$6,
-				$7,
-				$8,
-				$9,
-				$10,
-				NULL,
-				NULL
-			)
-			ON CONFLICT (action_attempt_id) DO NOTHING
-			RETURNING id
-		`,
-		candidate.ID,
-		candidate.ActionAttemptID,
-		candidate.Subject.Cluster,
-		candidate.Subject.Namespace,
-		candidate.Subject.Kind,
-		candidate.Subject.Name,
-		candidate.Subject.UID,
-		candidate.Status,
-		candidate.Version,
-		candidate.StartedAt,
-	).Scan(&insertedID)
-	if err == nil {
-		return candidate, true, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return remediationdomain.Verification{}, false, fmt.Errorf(
-			"begin PostgreSQL verification: %w",
-			err,
-		)
-	}
-
-	existing, err := store.lookupByActionAttemptID(
-		ctx,
-		command.ActionAttempt.ID,
+		store.pool,
+		command,
 	)
-	if err != nil {
-		return remediationdomain.Verification{}, false, err
-	}
-
-	if existing.Subject != command.Subject {
-		return remediationdomain.Verification{}, false, fmt.Errorf(
-			"%w: action attempt %q is already bound to another subject",
-			remediationdomain.ErrVerificationSubjectConflict,
-			command.ActionAttempt.ID,
-		)
-	}
-
-	return existing, false, nil
 }
+
 func (store *VerificationStore) Complete(
 	ctx context.Context,
 	command remediationdomain.CompleteVerificationCommand,
@@ -240,49 +164,11 @@ func (store *VerificationStore) lookupByActionAttemptID(
 	ctx context.Context,
 	actionAttemptID string,
 ) (remediationdomain.Verification, error) {
-	row := store.pool.QueryRow(
+	return lookupVerificationByActionAttemptIDWithQuerier(
 		ctx,
-		`
-			SELECT
-				verification.id,
-				verification.action_attempt_id,
-				action_attempt.incident_id,
-				action_attempt.plan_hash,
-				action_attempt.target_uid,
-				verification.subject_cluster,
-				verification.subject_namespace,
-				verification.subject_kind,
-				verification.subject_name,
-				verification.subject_uid,
-				verification.status,
-				verification.version,
-				verification.started_at,
-				verification.finished_at,
-				COALESCE(verification.evidence_code, '')
-			FROM verifications AS verification
-			INNER JOIN action_attempts AS action_attempt
-				ON action_attempt.id = verification.action_attempt_id
-			WHERE verification.action_attempt_id = $1
-		`,
+		store.pool,
 		actionAttemptID,
 	)
-
-	verification, err := scanVerification(row)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return remediationdomain.Verification{}, fmt.Errorf(
-			"%w: action attempt %q",
-			remediationdomain.ErrVerificationNotFound,
-			actionAttemptID,
-		)
-	}
-	if err != nil {
-		return remediationdomain.Verification{}, fmt.Errorf(
-			"lookup PostgreSQL verification by action attempt: %w",
-			err,
-		)
-	}
-
-	return verification, nil
 }
 
 func lookupVerificationByActionKeyForUpdate(

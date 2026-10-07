@@ -29,11 +29,13 @@ type incidentRegistry interface {
 }
 
 type incidentRegistryHandle struct {
-	Registry       incidentRegistry
-	Approvals      approvaldomain.Store
-	Plans          approvaldomain.PlanStore
-	ActionAttempts remediationdomain.ActionAttemptStore
-	close          func()
+	Registry              incidentRegistry
+	Approvals             approvaldomain.Store
+	Plans                 approvaldomain.PlanStore
+	ActionAttempts        remediationdomain.ActionAttemptStore
+	Verifications         remediationdomain.VerificationStore
+	VerificationLifecycle incidentVerificationLifecycle
+	close                 func()
 }
 
 func (handle incidentRegistryHandle) Close() {
@@ -51,15 +53,26 @@ func openIncidentRegistry(
 	}
 
 	switch config.IncidentStoreBackend {
-	case "memory":
-		return incidentRegistryHandle{
-			Registry:       incident.NewMemoryRegistry(),
-			Approvals:      approvaldomain.NewMemoryStore(),
-			Plans:          approvaldomain.NewMemoryPlanStore(),
-			ActionAttempts: remediationdomain.NewMemoryActionAttemptStore(),
-			close:          func() {},
-		}, nil
 
+	case "memory":
+		verificationStore :=
+			remediationdomain.NewMemoryVerificationStore()
+
+		registry :=
+			incident.NewRegistryWithVerificationLifecycleStore(
+				verificationStore,
+			)
+
+		return incidentRegistryHandle{
+			Registry:  registry,
+			Approvals: approvaldomain.NewMemoryStore(),
+			Plans:     approvaldomain.NewMemoryPlanStore(),
+			ActionAttempts: remediationdomain.
+				NewMemoryActionAttemptStore(),
+			Verifications:         verificationStore,
+			VerificationLifecycle: registry,
+			close:                 func() {},
+		}, nil
 	case "postgres":
 		poolConfig, err := pgxpool.ParseConfig(
 			config.IncidentStorePostgresDSN,
@@ -113,12 +126,23 @@ func openIncidentRegistry(
 			)
 		}
 
+		verificationStore :=
+			postgresadapter.NewVerificationStore(pool)
+
+		registry := postgresadapter.NewRegistry(pool)
+
 		return incidentRegistryHandle{
-			Registry:       postgresadapter.NewRegistry(pool),
-			Approvals:      postgresadapter.NewApprovalStore(pool),
-			Plans:          postgresadapter.NewPlanStore(pool),
-			ActionAttempts: postgresadapter.NewActionAttemptStore(pool),
-			close:          pool.Close,
+			Registry: registry,
+			Approvals: postgresadapter.NewApprovalStore(
+				pool,
+			),
+			Plans: postgresadapter.NewPlanStore(pool),
+			ActionAttempts: postgresadapter.
+				NewActionAttemptStore(pool),
+
+			Verifications:         verificationStore,
+			VerificationLifecycle: registry,
+			close:                 pool.Close,
 		}, nil
 
 	default:
