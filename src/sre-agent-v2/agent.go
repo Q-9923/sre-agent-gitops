@@ -42,6 +42,7 @@ type sreAgent struct {
 	actionAttempts        remediationdomain.ActionAttemptStore
 	verifications         remediationdomain.VerificationStore
 	verificationLifecycle incidentVerificationLifecycle
+	verificationExecutor  verificationExecutor
 	logger                *slog.Logger
 	now                   func() time.Time
 	markCycleProgress     func()

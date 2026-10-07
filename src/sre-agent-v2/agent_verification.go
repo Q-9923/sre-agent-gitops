@@ -24,6 +24,14 @@ const (
 	incidentVerifyingFenceConflict = "INCIDENT_VERIFYING_FENCE_CONFLICT"
 
 	verificationTransitionReason = "ACTION_ATTEMPT_TERMINAL"
+
+	verificationExecutorUnavailable = "VERIFICATION_EXECUTOR_UNAVAILABLE"
+
+	verificationExecutionFailed = "VERIFICATION_EXECUTION_FAILED"
+
+	verificationResultInvalid = "VERIFICATION_RESULT_INVALID"
+
+	verificationCompleteFailed = "VERIFICATION_COMPLETE_FAILED"
 )
 
 type incidentVerificationLifecycle interface {
@@ -31,6 +39,39 @@ type incidentVerificationLifecycle interface {
 		context.Context,
 		incident.BeginFencedVerificationCommand,
 	) (incident.FencedVerificationResult, error)
+}
+
+type verificationExecutionResult struct {
+	Status       remediationdomain.VerificationStatus
+	EvidenceCode string
+}
+
+func (result verificationExecutionResult) validate() error {
+	if strings.TrimSpace(result.EvidenceCode) == "" {
+		return errors.New(
+			"verification evidence code is required",
+		)
+	}
+
+	switch result.Status {
+	case remediationdomain.VerificationStatusRecovered,
+		remediationdomain.VerificationStatusNotRecovered,
+		remediationdomain.VerificationStatusInconclusive:
+		return nil
+
+	default:
+		return fmt.Errorf(
+			"verification status %q is not terminal",
+			result.Status,
+		)
+	}
+}
+
+type verificationExecutor interface {
+	Verify(
+		context.Context,
+		remediationdomain.VerificationSubject,
+	) (verificationExecutionResult, error)
 }
 
 func verificationSubjectForPod(
@@ -282,4 +323,169 @@ func (agent *sreAgent) beginVerification(
 	)
 
 	return verification, true
+}
+
+func (agent *sreAgent) executeVerification(
+	ctx context.Context,
+	verification remediationdomain.Verification,
+	action string,
+	targetLabel string,
+) (remediationdomain.Verification, bool) {
+	startedAt := agent.now()
+
+	fail := func(
+		errorCode string,
+		err error,
+	) (remediationdomain.Verification, bool) {
+		if ctx.Err() != nil {
+			return verification, false
+		}
+
+		agent.logger.Error(
+			"agent_verification_execution_failed",
+			"incident_id", verification.ActionKey.IncidentID,
+			"attempt_id", verification.ActionAttemptID,
+			"verification_id", verification.ID,
+			"verification_status", verification.Status,
+			"verification_version", verification.Version,
+			"action", action,
+			"target", targetLabel,
+			"target_uid", verification.ActionKey.TargetUID,
+			"plan_hash", verification.ActionKey.PlanHash,
+			"subject_cluster", verification.Subject.Cluster,
+			"subject_namespace", verification.Subject.Namespace,
+			"subject_kind", verification.Subject.Kind,
+			"subject_name", verification.Subject.Name,
+			"subject_uid", verification.Subject.UID,
+			"result", "NO_RESOLUTION",
+			"duration_ms",
+			agent.now().Sub(startedAt).Milliseconds(),
+			"error_code", errorCode,
+			"error", err,
+		)
+
+		return verification, false
+	}
+
+	if verification.Status !=
+		remediationdomain.VerificationStatusPending {
+		return fail(
+			verificationNotPending,
+			fmt.Errorf(
+				"verification %q has status %q; want %q",
+				verification.ID,
+				verification.Status,
+				remediationdomain.VerificationStatusPending,
+			),
+		)
+	}
+
+	if agent.verificationExecutor == nil {
+		return fail(
+			verificationExecutorUnavailable,
+			errors.New(
+				"verification executor is not configured",
+			),
+		)
+	}
+
+	if agent.verifications == nil {
+		return fail(
+			verificationStoreUnavailable,
+			errors.New(
+				"verification store is not configured",
+			),
+		)
+	}
+
+	executionContext, cancelExecution := context.WithTimeout(
+		ctx,
+		agent.config.KubernetesRequestTimeout,
+	)
+	result, err := agent.verificationExecutor.Verify(
+		executionContext,
+		verification.Subject,
+	)
+	executionContextErr := executionContext.Err()
+	cancelExecution()
+
+	if err != nil {
+		return fail(
+			verificationExecutionFailed,
+			err,
+		)
+	}
+
+	if executionContextErr != nil {
+		return fail(
+			verificationExecutionFailed,
+			executionContextErr,
+		)
+	}
+
+	if err := result.validate(); err != nil {
+		return fail(
+			verificationResultInvalid,
+			err,
+		)
+	}
+
+	finishedAt := agent.now()
+	completeCommand :=
+		remediationdomain.CompleteVerificationCommand{
+			ActionKey:       verification.ActionKey,
+			ExpectedVersion: verification.Version,
+			To:              result.Status,
+			FinishedAt:      finishedAt,
+			EvidenceCode:    result.EvidenceCode,
+		}
+
+	if err := completeCommand.Validate(); err != nil {
+		return fail(
+			verificationResultInvalid,
+			err,
+		)
+	}
+
+	completionContext, cancelCompletion := context.WithTimeout(
+		ctx,
+		agent.config.KubernetesRequestTimeout,
+	)
+	completed, err := agent.verifications.Complete(
+		completionContext,
+		completeCommand,
+	)
+	cancelCompletion()
+
+	if err != nil {
+		return fail(
+			verificationCompleteFailed,
+			err,
+		)
+	}
+
+	agent.logger.Info(
+		"agent_verification_completed",
+		"incident_id", completed.ActionKey.IncidentID,
+		"attempt_id", completed.ActionAttemptID,
+		"verification_id", completed.ID,
+		"verification_status", completed.Status,
+		"verification_version", completed.Version,
+		"action", action,
+		"target", targetLabel,
+		"target_uid", completed.ActionKey.TargetUID,
+		"plan_hash", completed.ActionKey.PlanHash,
+		"subject_cluster", completed.Subject.Cluster,
+		"subject_namespace", completed.Subject.Namespace,
+		"subject_kind", completed.Subject.Kind,
+		"subject_name", completed.Subject.Name,
+		"subject_uid", completed.Subject.UID,
+		"evidence_code", completed.EvidenceCode,
+		"result", "COMPLETED",
+		"duration_ms",
+		agent.now().Sub(startedAt).Milliseconds(),
+		"error_code", "",
+	)
+
+	return completed, true
 }

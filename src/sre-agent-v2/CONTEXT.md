@@ -76,6 +76,9 @@ _Avoid_: Action Result
 **Agent Verification Orchestration**:
 Action Attempt 进入 `SUCCEEDED`、`FAILED` 或 `UNKNOWN` 终态后，Agent 必须通过 Fenced Verification Begin，在同一个原子持久化边界内校验 Incident 当前版本、Claim Holder 和 Lease，将对应 Incident 持久迁移或确认在 `VERIFYING`，并为同一 Action Key 创建或复用唯一的 `PENDING` Verification。任一 fencing 校验、状态迁移、审计或 Verification 写入失败时必须整体失败或回滚；不得重放 Kubernetes 动作，也不得提前迁移到 `RESOLVED`。
 
+**Agent Verification Execution Seam**:
+Agent 只能对已持久化的 `PENDING` Verification，基于其稳定 Verification Subject 运行独立、有界的恢复检查。检查结果只能是 `RECOVERED`、`NOT_RECOVERED` 或 `INCONCLUSIVE`，并必须连同非空 Evidence Code 通过乐观版本校验持久化。执行器不可用、检查失败、结果非法或结果持久化失败时必须失败关闭并保持原有 `PENDING` 结果；已终态的 Verification 不得再次执行。本接缝不负责发现待执行 Verification，也不得直接将 Incident 迁移到 `RESOLVED`。
+
 **Resolution Evidence**:
 指向已持久化且状态为 `RECOVERED` 的 Verification；只有其 Action Key 归属当前 Incident 时，才能结束 Verifying Incident。
 _Avoid_: Action Attempt Result, Evidence Code
