@@ -42,6 +42,161 @@ type BeginFencedVerificationCommand struct {
 	Verification    remediationdomain.BeginVerificationCommand
 }
 
+type CompleteFencedVerificationCommand struct {
+	IncidentID      string
+	ExpectedVersion uint64
+	HolderID        string
+	Now             time.Time
+	Verification    remediationdomain.CompleteVerificationCommand
+}
+
+type verificationFence struct {
+	IncidentID      string
+	ExpectedVersion uint64
+	HolderID        string
+	Now             time.Time
+}
+
+func (command BeginFencedVerificationCommand) fence() verificationFence {
+	return verificationFence{
+		IncidentID:      command.IncidentID,
+		ExpectedVersion: command.ExpectedVersion,
+		HolderID:        command.HolderID,
+		Now:             command.Now,
+	}
+}
+
+func (command CompleteFencedVerificationCommand) fence() verificationFence {
+	return verificationFence{
+		IncidentID:      command.IncidentID,
+		ExpectedVersion: command.ExpectedVersion,
+		HolderID:        command.HolderID,
+		Now:             command.Now,
+	}
+}
+
+func (command CompleteFencedVerificationCommand) Validate() error {
+	switch {
+	case strings.TrimSpace(command.IncidentID) == "":
+		return fmt.Errorf(
+			"%w: incident ID is required",
+			ErrInvalidFencedVerification,
+		)
+	case command.ExpectedVersion == 0:
+		return fmt.Errorf(
+			"%w: expected incident version is required",
+			ErrInvalidFencedVerification,
+		)
+	case strings.TrimSpace(command.HolderID) == "":
+		return fmt.Errorf(
+			"%w: claim holder ID is required",
+			ErrInvalidFencedVerification,
+		)
+	case command.Now.IsZero():
+		return fmt.Errorf(
+			"%w: current time is required",
+			ErrInvalidFencedVerification,
+		)
+	}
+
+	if err := command.Verification.Validate(); err != nil {
+		return fmt.Errorf(
+			"%w: verification command: %v",
+			ErrInvalidFencedVerification,
+			err,
+		)
+	}
+
+	if command.Verification.ActionKey.IncidentID !=
+		command.IncidentID {
+		return fmt.Errorf(
+			"%w: verification incident %q does not match incident %q",
+			ErrInvalidFencedVerification,
+			command.Verification.ActionKey.IncidentID,
+			command.IncidentID,
+		)
+	}
+
+	return nil
+}
+
+type FencedVerificationCompletionResult struct {
+	Incident     Incident
+	Verification remediationdomain.Verification
+}
+
+func (registry *Registry) CompleteFencedVerification(
+	ctx context.Context,
+	command CompleteFencedVerificationCommand,
+) (FencedVerificationCompletionResult, error) {
+	if registry == nil {
+		return FencedVerificationCompletionResult{}, fmt.Errorf(
+			"%w: incident registry is nil",
+			ErrVerificationLifecycleUnavailable,
+		)
+	}
+
+	if ctx == nil {
+		return FencedVerificationCompletionResult{}, fmt.Errorf(
+			"%w: context is required",
+			ErrInvalidFencedVerification,
+		)
+	}
+
+	if err := command.Validate(); err != nil {
+		return FencedVerificationCompletionResult{}, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return FencedVerificationCompletionResult{}, err
+	}
+
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return FencedVerificationCompletionResult{}, err
+	}
+
+	if registry.verificationLifecycleStore == nil {
+		return FencedVerificationCompletionResult{},
+			ErrVerificationLifecycleUnavailable
+	}
+
+	current, err := registry.validateVerificationFenceLocked(
+		command.fence(),
+	)
+	if err != nil {
+		return FencedVerificationCompletionResult{}, err
+	}
+	if current.State != StateVerifying {
+		return FencedVerificationCompletionResult{}, fmt.Errorf(
+			"%w: incident %q is in state %q",
+			ErrInvalidVerificationIncidentState,
+			command.IncidentID,
+			current.State,
+		)
+	}
+
+	verification, err :=
+		registry.verificationLifecycleStore.Complete(
+			ctx,
+			command.Verification,
+		)
+	if err != nil {
+		return FencedVerificationCompletionResult{}, fmt.Errorf(
+			"complete fenced Verification for incident %q: %w",
+			command.IncidentID,
+			err,
+		)
+	}
+
+	return FencedVerificationCompletionResult{
+		Incident:     current,
+		Verification: verification,
+	}, nil
+}
+
 func (command BeginFencedVerificationCommand) Validate() error {
 	switch {
 	case strings.TrimSpace(command.IncidentID) == "":
@@ -108,6 +263,90 @@ func NewRegistryWithVerificationLifecycleStore(
 	return registry
 }
 
+func (registry *Registry) validateVerificationFenceLocked(
+	fence verificationFence,
+) (Incident, error) {
+	current, exists := registry.incidentsByID[fence.IncidentID]
+	if !exists {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q",
+			ErrVerificationIncidentNotFound,
+			fence.IncidentID,
+		)
+	}
+
+	if current.Version != fence.ExpectedVersion {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q current=%d expected=%d",
+			ErrVersionConflict,
+			fence.IncidentID,
+			current.Version,
+			fence.ExpectedVersion,
+		)
+	}
+
+	claim, claimed := registry.claimsByIncidentID[fence.IncidentID]
+	if !claimed {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q has no active claim",
+			ErrVerificationFenceConflict,
+			fence.IncidentID,
+		)
+	}
+
+	if claim.HolderID != fence.HolderID {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q is held by %q, not %q",
+			ErrVerificationFenceConflict,
+			fence.IncidentID,
+			claim.HolderID,
+			fence.HolderID,
+		)
+	}
+
+	if claim.Incident.Version != fence.ExpectedVersion {
+		return Incident{}, fmt.Errorf(
+			"%w: claim for incident %q has version %d, expected %d",
+			ErrVerificationFenceConflict,
+			fence.IncidentID,
+			claim.Incident.Version,
+			fence.ExpectedVersion,
+		)
+	}
+
+	currentClaimAudited := false
+
+	for _, event := range registry.claimHistoryByIncidentID[fence.IncidentID] {
+		if event.IncidentID == fence.IncidentID &&
+			event.IncidentVersion == fence.ExpectedVersion &&
+			event.HolderID == fence.HolderID &&
+			event.ExpiresAt.Equal(claim.ExpiresAt) {
+			currentClaimAudited = true
+			break
+		}
+	}
+
+	if !currentClaimAudited {
+		return Incident{}, fmt.Errorf(
+			"%w: incident %q version %d has no matching claim audit",
+			ErrVerificationFenceConflict,
+			fence.IncidentID,
+			fence.ExpectedVersion,
+		)
+	}
+
+	if !fence.Now.Before(claim.ExpiresAt) {
+		return Incident{}, fmt.Errorf(
+			"%w: claim for incident %q expired at %s",
+			ErrVerificationFenceConflict,
+			fence.IncidentID,
+			claim.ExpiresAt,
+		)
+	}
+
+	return current, nil
+}
+
 func (registry *Registry) BeginFencedVerification(
 	ctx context.Context,
 	command BeginFencedVerificationCommand,
@@ -145,63 +384,12 @@ func (registry *Registry) BeginFencedVerification(
 		return FencedVerificationResult{}, ErrVerificationLifecycleUnavailable
 	}
 
-	current, exists := registry.incidentsByID[command.IncidentID]
-	if !exists {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: incident %q",
-			ErrVerificationIncidentNotFound,
-			command.IncidentID,
-		)
+	current, err := registry.validateVerificationFenceLocked(
+		command.fence(),
+	)
+	if err != nil {
+		return FencedVerificationResult{}, err
 	}
-
-	if current.Version != command.ExpectedVersion {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: incident %q current=%d expected=%d",
-			ErrVersionConflict,
-			command.IncidentID,
-			current.Version,
-			command.ExpectedVersion,
-		)
-	}
-
-	claim, claimed := registry.claimsByIncidentID[command.IncidentID]
-	if !claimed {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: incident %q has no active claim",
-			ErrVerificationFenceConflict,
-			command.IncidentID,
-		)
-	}
-
-	if claim.HolderID != command.HolderID {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: incident %q is held by %q, not %q",
-			ErrVerificationFenceConflict,
-			command.IncidentID,
-			claim.HolderID,
-			command.HolderID,
-		)
-	}
-
-	if claim.Incident.Version != command.ExpectedVersion {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: claim for incident %q has version %d, expected %d",
-			ErrVerificationFenceConflict,
-			command.IncidentID,
-			claim.Incident.Version,
-			command.ExpectedVersion,
-		)
-	}
-
-	if !command.Now.Before(claim.ExpiresAt) {
-		return FencedVerificationResult{}, fmt.Errorf(
-			"%w: claim for incident %q expired at %s",
-			ErrVerificationFenceConflict,
-			command.IncidentID,
-			claim.ExpiresAt,
-		)
-	}
-
 	next := current
 
 	switch current.State {

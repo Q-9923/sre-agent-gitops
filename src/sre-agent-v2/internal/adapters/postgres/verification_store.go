@@ -48,7 +48,7 @@ func (store *VerificationStore) Complete(
 		return remediationdomain.Verification{}, err
 	}
 
-	tx, err := store.pool.BeginTx(
+	transaction, err := store.pool.BeginTx(
 		ctx,
 		pgx.TxOptions{},
 	)
@@ -59,12 +59,36 @@ func (store *VerificationStore) Complete(
 		)
 	}
 	defer func() {
-		_ = tx.Rollback(ctx)
+		_ = transaction.Rollback(ctx)
 	}()
 
+	verification, err := completeVerificationInTransaction(
+		ctx,
+		transaction,
+		command,
+	)
+	if err != nil {
+		return remediationdomain.Verification{}, err
+	}
+
+	if err := transaction.Commit(ctx); err != nil {
+		return remediationdomain.Verification{}, fmt.Errorf(
+			"commit PostgreSQL verification completion: %w",
+			err,
+		)
+	}
+
+	return verification, nil
+}
+
+func completeVerificationInTransaction(
+	ctx context.Context,
+	transaction pgx.Tx,
+	command remediationdomain.CompleteVerificationCommand,
+) (remediationdomain.Verification, error) {
 	current, err := lookupVerificationByActionKeyForUpdate(
 		ctx,
-		tx,
+		transaction,
 		command.ActionKey,
 	)
 	if err != nil {
@@ -72,13 +96,6 @@ func (store *VerificationStore) Complete(
 	}
 
 	if verificationCompletionMatches(current, command) {
-		if err := tx.Commit(ctx); err != nil {
-			return remediationdomain.Verification{}, fmt.Errorf(
-				"commit idempotent PostgreSQL verification completion: %w",
-				err,
-			)
-		}
-
 		return current, nil
 	}
 
@@ -91,7 +108,8 @@ func (store *VerificationStore) Complete(
 		)
 	}
 
-	if current.Status != remediationdomain.VerificationStatusPending {
+	if current.Status !=
+		remediationdomain.VerificationStatusPending {
 		return remediationdomain.Verification{}, fmt.Errorf(
 			"%w: current=%q target=%q",
 			remediationdomain.ErrInvalidVerificationTransition,
@@ -107,20 +125,20 @@ func (store *VerificationStore) Complete(
 		)
 	}
 
-	result, err := tx.Exec(
+	result, err := transaction.Exec(
 		ctx,
 		`
-			UPDATE verifications
-			SET
-				status = $1,
-				version = version + 1,
-				finished_at = $2,
-				evidence_code = $3
-			WHERE
-				id = $4
-				AND version = $5
-				AND status = $6
-		`,
+UPDATE verifications
+SET
+	status = $1,
+	version = version + 1,
+	finished_at = $2,
+	evidence_code = $3
+WHERE
+	id = $4
+	AND version = $5
+	AND status = $6
+`,
 		command.To,
 		command.FinishedAt,
 		command.EvidenceCode,
@@ -149,13 +167,6 @@ func (store *VerificationStore) Complete(
 	current.Version++
 	current.FinishedAt = &finishedAt
 	current.EvidenceCode = command.EvidenceCode
-
-	if err := tx.Commit(ctx); err != nil {
-		return remediationdomain.Verification{}, fmt.Errorf(
-			"commit PostgreSQL verification completion: %w",
-			err,
-		)
-	}
 
 	return current, nil
 }

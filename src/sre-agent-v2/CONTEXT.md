@@ -83,6 +83,10 @@ _Avoid_: Verification Execution, Verification Result
 **Agent Verification Execution Seam**:
 Agent 只能对已持久化的 `PENDING` Verification，基于其稳定 Verification Subject 运行独立、有界的恢复检查。检查结果只能是 `RECOVERED`、`NOT_RECOVERED` 或 `INCONCLUSIVE`，并必须连同非空 Evidence Code 通过乐观版本校验持久化。执行器不可用、检查失败、结果非法或结果持久化失败时必须失败关闭并保持原有 `PENDING` 结果；已终态的 Verification 不得再次执行。本接缝不负责发现待执行 Verification，也不得直接将 Incident 迁移到 `RESOLVED`。
 
+**Fenced Verification Complete**:
+Agent 只能在 Incident 仍处于 `VERIFYING`，且 Incident 版本、Claim Holder、未过期 Lease 与已持久化 Claim Audit 全部匹配时，将对应 `PENDING` Verification 原子持久化为 `RECOVERED`、`NOT_RECOVERED` 或 `INCONCLUSIVE`。相同参数的精确重试必须返回同一终态结果，不得再次推进 Incident 或 Verification 版本；旧 Holder、过期 Lease、版本冲突、缺失 Claim Audit 或 Verification 写入失败必须失败关闭且不得改变已有状态。本接缝不直接将 Incident 迁移到 `RESOLVED`。
+_Avoid_: Unfenced Verification Result, Incident Resolution
+
 **Resolution Evidence**:
 指向已持久化且状态为 `RECOVERED` 的 Verification；只有其 Action Key 归属当前 Incident 时，才能结束 Verifying Incident。
 _Avoid_: Action Attempt Result, Evidence Code

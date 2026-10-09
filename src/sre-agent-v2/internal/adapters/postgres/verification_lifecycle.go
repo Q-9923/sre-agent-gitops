@@ -12,6 +12,35 @@ import (
 	remediationdomain "sre-agent/internal/remediation"
 )
 
+type verificationFence struct {
+	IncidentID      string
+	ExpectedVersion uint64
+	HolderID        string
+	Now             time.Time
+}
+
+func verificationFenceFromBegin(
+	command incidentdomain.BeginFencedVerificationCommand,
+) verificationFence {
+	return verificationFence{
+		IncidentID:      command.IncidentID,
+		ExpectedVersion: command.ExpectedVersion,
+		HolderID:        command.HolderID,
+		Now:             command.Now,
+	}
+}
+
+func verificationFenceFromComplete(
+	command incidentdomain.CompleteFencedVerificationCommand,
+) verificationFence {
+	return verificationFence{
+		IncidentID:      command.IncidentID,
+		ExpectedVersion: command.ExpectedVersion,
+		HolderID:        command.HolderID,
+		Now:             command.Now,
+	}
+}
+
 type verificationBeginQuerier interface {
 	QueryRow(
 		context.Context,
@@ -63,7 +92,7 @@ func (registry *Registry) BeginFencedVerification(
 	current, err := lockIncidentForFencedVerification(
 		ctx,
 		transaction,
-		command,
+		verificationFenceFromBegin(command),
 	)
 	if err != nil {
 		return incidentdomain.FencedVerificationResult{}, err
@@ -138,7 +167,7 @@ func (registry *Registry) BeginFencedVerification(
 func lockIncidentForFencedVerification(
 	ctx context.Context,
 	transaction pgx.Tx,
-	command incidentdomain.BeginFencedVerificationCommand,
+	fence verificationFence,
 ) (incidentdomain.Incident, error) {
 	var (
 		current             incidentdomain.Incident
@@ -179,7 +208,7 @@ FROM incidents AS incident
 WHERE incident.id = $1
 FOR UPDATE OF incident
 `,
-		command.IncidentID,
+		fence.IncidentID,
 	).Scan(
 		&current.ID,
 		&state,
@@ -194,7 +223,7 @@ FOR UPDATE OF incident
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q",
 			incidentdomain.ErrVerificationIncidentNotFound,
-			command.IncidentID,
+			fence.IncidentID,
 		)
 	}
 	if err != nil {
@@ -207,23 +236,23 @@ FOR UPDATE OF incident
 	current.State = incidentdomain.State(state)
 	current.Version = uint64(version)
 
-	if current.Version != command.ExpectedVersion {
+	if current.Version != fence.ExpectedVersion {
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q current=%d expected=%d",
 			incidentdomain.ErrVersionConflict,
-			command.IncidentID,
+			fence.IncidentID,
 			current.Version,
-			command.ExpectedVersion,
+			fence.ExpectedVersion,
 		)
 	}
 
-	if claimHolder != command.HolderID {
+	if claimHolder != fence.HolderID {
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q is held by %q, not %q",
 			incidentdomain.ErrVerificationFenceConflict,
-			command.IncidentID,
+			fence.IncidentID,
 			claimHolder,
-			command.HolderID,
+			fence.HolderID,
 		)
 	}
 
@@ -231,16 +260,16 @@ FOR UPDATE OF incident
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q version %d has no matching claim audit",
 			incidentdomain.ErrVerificationFenceConflict,
-			command.IncidentID,
-			command.ExpectedVersion,
+			fence.IncidentID,
+			fence.ExpectedVersion,
 		)
 	}
 
-	if !command.Now.Before(claimExpiresAt) {
+	if !fence.Now.Before(claimExpiresAt) {
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: claim for incident %q expired at %s",
 			incidentdomain.ErrVerificationFenceConflict,
-			command.IncidentID,
+			fence.IncidentID,
 			claimExpiresAt,
 		)
 	}
@@ -255,12 +284,11 @@ FOR UPDATE OF incident
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q is in state %q",
 			incidentdomain.ErrInvalidVerificationIncidentState,
-			command.IncidentID,
+			fence.IncidentID,
 			current.State,
 		)
 	}
 }
-
 func requirePersistedTerminalActionAttempt(
 	ctx context.Context,
 	transaction pgx.Tx,
