@@ -12,8 +12,13 @@ spec:
 
   source:
     repoURL: https://github.com/Q-9923/sre-agent-gitops.git
+    # 发布时将该模板固定到已审查且远端可读取的完整提交 SHA。
     targetRevision: main
     path: apps/sre-agent-v2
+    # 恢复阶段仅接管观测对象，不覆盖缓存应急 Deployment 或运行态 ConfigMap。
+    directory:
+      recurse: false
+      include: '{prometheusrule.yaml,grafana-dashboard.yaml,service.yaml,servicemonitor.yaml}'
 
   destination:
     server: https://kubernetes.default.svc
@@ -21,8 +26,9 @@ spec:
 
   syncPolicy:
     automated:
-      prune: true
-      selfHeal: true
+      enabled: false
+      prune: false
+      selfHeal: false
       allowEmpty: false
     syncOptions:
       - CreateNamespace=true

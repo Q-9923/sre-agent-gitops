@@ -85,3 +85,54 @@ tests:
       - eval_time: 10m
         alertname: SREAgentCycleErrorsIncreasing
         exp_alerts: []
+
+  - name: Permanent lab CrashLoop fires after the hold and recovers
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="sre-agent-lab",pod="crash-app-demo",container="app",reason="CrashLoopBackOff"}'
+        values: '0 1 1 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PodCrashLooping
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: PodCrashLooping
+        exp_alerts:
+          - exp_labels:
+              namespace: sre-agent-lab
+              pod: crash-app-demo
+              container: app
+              reason: CrashLoopBackOff
+              severity: critical
+            exp_annotations:
+              summary: Pod is crash looping in the allowed lab namespace
+              description: Pod sre-agent-lab/crash-app-demo (container app) is in CrashLoopBackOff.
+      - eval_time: 3m
+        alertname: PodCrashLooping
+        exp_alerts: []
+
+  - name: CrashLoops outside the allowed namespace never enter the Agent rule
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="default",pod="default-crash",container="app",reason="CrashLoopBackOff"}'
+        values: '1 1 1'
+      - series: 'kube_pod_container_status_waiting_reason{namespace="kube-system",pod="system-crash",container="app",reason="CrashLoopBackOff"}'
+        values: '1 1 1'
+      - series: 'kube_pod_container_status_waiting_reason{namespace="monitoring",pod="monitoring-crash",container="app",reason="CrashLoopBackOff"}'
+        values: '1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PodCrashLooping
+        exp_alerts: []
+
+  - name: Healthy or non CrashLoop lab containers do not fire
+    interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{namespace="sre-agent-lab",pod="healthy-app",container="app",reason="CrashLoopBackOff"}'
+        values: '0 0 0'
+      - series: 'kube_pod_container_status_waiting_reason{namespace="sre-agent-lab",pod="pull-error",container="app",reason="ImagePullBackOff"}'
+        values: '1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PodCrashLooping
+        exp_alerts: []

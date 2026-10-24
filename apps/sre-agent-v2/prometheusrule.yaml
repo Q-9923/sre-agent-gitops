@@ -9,6 +9,17 @@ metadata:
     release: prometheus-stack
 spec:
   groups:
+    # 正式规则覆盖允许命名空间的全部 Pod，不使用临时 E2E Pod 前缀。
+    - name: sre-agent-v2.lab-workloads
+      rules:
+        - alert: PodCrashLooping
+          expr: kube_pod_container_status_waiting_reason{namespace="sre-agent-lab",reason="CrashLoopBackOff"} == 1
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Pod is crash looping in the allowed lab namespace
+            description: 'Pod {{ $labels.namespace }}/{{ $labels.pod }} (container {{ $labels.container }}) is in CrashLoopBackOff.'
     - name: sre-agent-v2.rules
       rules:
         - alert: SREAgentMetricsTargetDown
