@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: sre-agent-v2
     app.kubernetes.io/component: agent
-    app.kubernetes.io/version: v2.0.0-shadow.9
+    app.kubernetes.io/version: v2.0.0-shadow.worker-2836d03c8890
 spec:
   replicas: 1
 
@@ -23,11 +23,14 @@ spec:
       labels:
         app.kubernetes.io/name: sre-agent-v2
         app.kubernetes.io/component: agent
-        app.kubernetes.io/version: v2.0.0-shadow.9
+        app.kubernetes.io/version: v2.0.0-shadow.worker-2836d03c8890
     spec:
       serviceAccountName: sre-agent-v2
       automountServiceAccountToken: true
       terminationGracePeriodSeconds: 30
+
+      nodeSelector:
+        kubernetes.io/hostname: k8s-node3
 
       imagePullSecrets:
         - name: ghcr-pull-secret
@@ -41,7 +44,7 @@ spec:
 
       containers:
         - name: sre-agent
-          image: ghcr.io/q-9923/sre-agent:v2.0.0-shadow.9-0afbfd74b896@sha256:0fe8a30c85ae8de03b4f940a6dc8e30611f1ba9bebc85c7041d5efcd4b216aed
+          image: ghcr.io/q-9923/sre-agent@sha256:97fa61a8135d6f1c04e5d1400ba5922b4fa1195d26a773a50d1ab47c8cab6080
           imagePullPolicy: IfNotPresent
 
           ports:
@@ -64,6 +67,29 @@ spec:
 
             - name: HEALTH_ADDRESS
               value: ":8080"
+
+            # Verification Worker persistence remains explicit and safe until
+            # the production PostgreSQL service, Secret, storage and backup
+            # design are provisioned.
+            - name: INCIDENT_STORE_BACKEND
+              value: "memory"
+
+            - name: INCIDENT_STORE_CONNECT_TIMEOUT
+              value: "10s"
+
+            - name: INCIDENT_STORE_MIGRATION_TIMEOUT
+              value: "30s"
+
+            # The Pod UID is unique across replacement Pods and is therefore
+            # suitable as the Claim Holder identity for this Agent instance.
+            - name: INCIDENT_CLAIM_HOLDER_ID
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.uid
+
+            - name: INCIDENT_CLAIM_LEASE_DURATION
+              value: "30s"
 
             - name: REMEDIATION_STATE_NAMESPACE
               value: "sre-agent-system"
