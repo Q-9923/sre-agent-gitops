@@ -147,12 +147,24 @@ func TestRegistryResolveVerifyingIncidentWithPersistedRecoveredVerification(
 		t.Fatalf("Verification Complete() error = %v", err)
 	}
 
+	resolutionAt := recoveredVerification.FinishedAt.Add(time.Second)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-controller",
+		resolutionAt,
+	)
+
 	resolved, err := registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "verification-controller",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -175,11 +187,11 @@ func TestRegistryResolveVerifyingIncidentWithPersistedRecoveredVerification(
 			incidentdomain.StateResolved,
 		)
 	}
-	if resolved.Version != verifying.Version+1 {
+	if resolved.Version != claim.Incident.Version+1 {
 		t.Fatalf(
 			"resolved Version = %d; want %d",
 			resolved.Version,
-			verifying.Version+1,
+			claim.Incident.Version+1,
 		)
 	}
 	if resolved.ResolutionVerificationID != recoveredVerification.ID {
@@ -189,6 +201,33 @@ func TestRegistryResolveVerifyingIncidentWithPersistedRecoveredVerification(
 			recoveredVerification.ID,
 		)
 	}
+}
+
+func claimIncidentForResolution(
+	t *testing.T,
+	ctx context.Context,
+	registry *incidentdomain.Registry,
+	current incidentdomain.Incident,
+	holderID string,
+	now time.Time,
+) incidentdomain.Claim {
+	t.Helper()
+
+	claim, err := registry.Claim(
+		ctx,
+		incidentdomain.ClaimCommand{
+			IncidentID:      current.ID,
+			ExpectedVersion: current.Version,
+			HolderID:        holderID,
+			Now:             now,
+			LeaseDuration:   time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Claim() for resolution error = %v", err)
+	}
+
+	return claim
 }
 
 func transitionIncident(

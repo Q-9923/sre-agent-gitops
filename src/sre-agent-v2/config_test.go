@@ -356,6 +356,50 @@ func TestLoadConfigRejectsNonPositiveIncidentClaimLeaseDuration(
 		})
 	}
 }
+func TestLoadConfigRejectsIncidentClaimLeaseNotGreaterThanRequestTimeout(
+	t *testing.T,
+) {
+	tests := []struct {
+		name           string
+		leaseDuration  string
+		requestTimeout string
+	}{
+		{
+			name:           "shorter",
+			leaseDuration:  "14s",
+			requestTimeout: "15s",
+		},
+		{
+			name:           "equal",
+			leaseDuration:  "15s",
+			requestTimeout: "15s",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(
+				"INCIDENT_CLAIM_LEASE_DURATION",
+				test.leaseDuration,
+			)
+			t.Setenv(
+				"KUBERNETES_REQUEST_TIMEOUT",
+				test.requestTimeout,
+			)
+
+			_, err := loadConfig()
+			if err == nil {
+				t.Fatalf(
+					"loadConfig() accepted lease=%s and timeout=%s; "+
+						"want an error",
+					test.leaseDuration,
+					test.requestTimeout,
+				)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsEmptyIncidentClaimHolderID(t *testing.T) {
 	t.Setenv(
 		"INCIDENT_CLAIM_HOLDER_ID",

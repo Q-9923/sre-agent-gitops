@@ -70,7 +70,7 @@ func (result verificationExecutionResult) validate() error {
 type verificationExecutor interface {
 	Verify(
 		context.Context,
-		remediationdomain.VerificationSubject,
+		remediationdomain.Verification,
 	) (verificationExecutionResult, error)
 }
 
@@ -404,7 +404,7 @@ func (agent *sreAgent) executeVerification(
 	)
 	result, err := agent.verificationExecutor.Verify(
 		executionContext,
-		verification.Subject,
+		verification,
 	)
 	executionContextErr := executionContext.Err()
 	cancelExecution()

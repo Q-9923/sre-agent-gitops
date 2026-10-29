@@ -30,42 +30,54 @@ type decisionSource interface {
 }
 
 type sreAgent struct {
-	config                agentConfig
-	kubernetes            kubernetes.Interface
-	collector             podContextSource
-	prometheus            firingAlertSource
-	ollama                decisionSource
-	incidents             incidentRegistry
-	memory                remediationStateStore
-	approvals             approvaldomain.Store
-	plans                 approvaldomain.PlanStore
-	actionAttempts        remediationdomain.ActionAttemptStore
-	verifications         remediationdomain.VerificationStore
-	verificationLifecycle incidentVerificationLifecycle
-	verificationExecutor  verificationExecutor
-	logger                *slog.Logger
-	now                   func() time.Time
-	markCycleProgress     func()
-	markSuccessfulCycle   func()
-	recordCycleResult     func(string)
+	config                 agentConfig
+	kubernetes             kubernetes.Interface
+	collector              podContextSource
+	prometheus             firingAlertSource
+	ollama                 decisionSource
+	incidents              incidentRegistry
+	memory                 remediationStateStore
+	approvals              approvaldomain.Store
+	plans                  approvaldomain.PlanStore
+	actionAttempts         remediationdomain.ActionAttemptStore
+	verifications          remediationdomain.VerificationStore
+	verificationLifecycle  incidentVerificationLifecycle
+	verificationExecutor   verificationExecutor
+	verificationWorker     verificationWorkerLifecycle
+	logger                 *slog.Logger
+	now                    func() time.Time
+	markCycleProgress      func()
+	markSuccessfulCycle    func()
+	recordCycleResult      func(string)
+	waitVerificationWorker func(context.Context, time.Duration) error
 }
 
 func newSREAgent(
 	config agentConfig,
 	kubernetesClient kubernetes.Interface,
-	incidents incidentRegistry,
-	approvals approvaldomain.Store,
+	incidentHandle incidentRegistryHandle,
 	logger *slog.Logger,
 	markCycleProgress func(),
 	markSuccessfulCycle func(),
 	recordCycleResult func(string),
 ) *sreAgent {
 	return &sreAgent{
-		config:     config,
-		kubernetes: kubernetesClient,
-		incidents:  incidents,
-		approvals:  approvals,
-		collector:  newKubernetesContextCollector(kubernetesClient),
+		config:                config,
+		kubernetes:            kubernetesClient,
+		incidents:             incidentHandle.Registry,
+		approvals:             incidentHandle.Approvals,
+		plans:                 incidentHandle.Plans,
+		actionAttempts:        incidentHandle.ActionAttempts,
+		verifications:         incidentHandle.Verifications,
+		verificationLifecycle: incidentHandle.VerificationLifecycle,
+		verificationExecutor: newKubernetesVerificationExecutor(
+			kubernetesClient,
+			config.ClusterName,
+		),
+		verificationWorker: incidentHandle.VerificationWorker,
+		collector: newKubernetesContextCollector(
+			kubernetesClient,
+		),
 		prometheus: newPrometheusClient(
 			config.PrometheusURL,
 			&http.Client{Timeout: config.PrometheusTimeout},
@@ -87,6 +99,7 @@ func newSREAgent(
 		recordCycleResult:   recordCycleResult,
 	}
 }
+
 func (agent *sreAgent) run(ctx context.Context) {
 	if ctx.Err() != nil {
 		agent.logger.Info(
@@ -95,6 +108,20 @@ func (agent *sreAgent) run(ctx context.Context) {
 		)
 		return
 	}
+
+	workerContext, cancelWorker :=
+		context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+
+	go func() {
+		defer close(workerDone)
+		agent.runVerificationWorker(workerContext)
+	}()
+
+	defer func() {
+		cancelWorker()
+		<-workerDone
+	}()
 
 	agent.runCycle(ctx)
 

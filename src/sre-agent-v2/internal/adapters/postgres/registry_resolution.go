@@ -45,58 +45,21 @@ func (registry *Registry) Resolve(
 		_ = transaction.Rollback(rollbackContext)
 	}()
 
-	var (
-		currentState   string
-		currentVersion int64
-	)
-
-	err = transaction.QueryRow(
+	current, err := lockIncidentForFencedVerification(
 		ctx,
-		`
-SELECT
-    state,
-    version
-FROM incidents
-WHERE id = $1
-FOR UPDATE
-`,
-		command.IncidentID,
-	).Scan(
-		&currentState,
-		&currentVersion,
+		transaction,
+		verificationFenceFromResolve(command),
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return incidentdomain.Incident{}, fmt.Errorf(
-			"%w: incident %q",
-			incidentdomain.ErrIncidentNotFound,
-			command.IncidentID,
-		)
-	}
 	if err != nil {
-		return incidentdomain.Incident{}, fmt.Errorf(
-			"lock incident for resolution: %w",
-			err,
-		)
+		return incidentdomain.Incident{}, err
 	}
 
-	if currentVersion <= 0 ||
-		uint64(currentVersion) != command.ExpectedVersion {
-		return incidentdomain.Incident{}, fmt.Errorf(
-			"%w: incident %q current=%d expected=%d",
-			incidentdomain.ErrVersionConflict,
-			command.IncidentID,
-			currentVersion,
-			command.ExpectedVersion,
-		)
-	}
-
-	if incidentdomain.State(currentState) !=
-		incidentdomain.StateVerifying {
+	if current.State != incidentdomain.StateVerifying {
 		return incidentdomain.Incident{}, fmt.Errorf(
 			"%w: incident %q from %q to %q",
 			incidentdomain.ErrInvalidTransition,
 			command.IncidentID,
-			currentState,
+			current.State,
 			incidentdomain.StateResolved,
 		)
 	}

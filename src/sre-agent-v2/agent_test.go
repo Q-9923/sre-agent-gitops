@@ -1053,8 +1053,10 @@ func TestNewSREAgentConnectsSuccessfulCycleToReadiness(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
-		incident.NewMemoryRegistry(),
-		approval.NewMemoryStore(),
+		incidentRegistryHandle{
+			Registry:  incident.NewMemoryRegistry(),
+			Approvals: approval.NewMemoryStore(),
+		},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		func() {},
 		readiness.markSuccessfulCycle,
@@ -1168,8 +1170,10 @@ func TestNewSREAgentConnectsCycleProgressToLiveness(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
-		incident.NewMemoryRegistry(),
-		approval.NewMemoryStore(),
+		incidentRegistryHandle{
+			Registry:  incident.NewMemoryRegistry(),
+			Approvals: approval.NewMemoryStore(),
+		},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		liveness.markProgress,
 		func() {},
@@ -1659,8 +1663,10 @@ func TestNewSREAgentConnectsCycleResultRecorder(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		fake.NewSimpleClientset(),
-		incident.NewMemoryRegistry(),
-		approval.NewMemoryStore(),
+		incidentRegistryHandle{
+			Registry:  incident.NewMemoryRegistry(),
+			Approvals: approval.NewMemoryStore(),
+		},
 		slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),
@@ -1705,8 +1711,10 @@ func TestNewSREAgentUsesConfiguredConfigMapRemediationState(t *testing.T) {
 	agent := newSREAgent(
 		config,
 		kubernetesClient,
-		incident.NewMemoryRegistry(),
-		approval.NewMemoryStore(),
+		incidentRegistryHandle{
+			Registry:  incident.NewMemoryRegistry(),
+			Approvals: approval.NewMemoryStore(),
+		},
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
 		nil,
@@ -1990,8 +1998,10 @@ func TestNewSREAgentConnectsProvidedIncidentRegistry(t *testing.T) {
 			KubernetesRequestTimeout: time.Second,
 		},
 		fake.NewSimpleClientset(),
-		lifecycleRegistry,
-		approval.NewMemoryStore(),
+		incidentRegistryHandle{
+			Registry:  lifecycleRegistry,
+			Approvals: approval.NewMemoryStore(),
+		},
 		slog.New(
 			slog.NewTextHandler(io.Discard, nil),
 		),

@@ -92,6 +92,8 @@ type ResolveCommand struct {
 	IncidentID      string
 	ExpectedVersion uint64
 	VerificationID  string
+	HolderID        string
+	Now             time.Time
 	Actor           string
 	ReasonCode      string
 }
@@ -111,6 +113,16 @@ func (command ResolveCommand) Validate() error {
 	case strings.TrimSpace(command.VerificationID) == "":
 		return fmt.Errorf(
 			"%w: verification ID is required",
+			ErrInvalidResolution,
+		)
+	case strings.TrimSpace(command.HolderID) == "":
+		return fmt.Errorf(
+			"%w: holder ID is required",
+			ErrInvalidResolution,
+		)
+	case command.Now.IsZero():
+		return fmt.Errorf(
+			"%w: current time is required",
 			ErrInvalidResolution,
 		)
 	case strings.TrimSpace(command.Actor) == "":
@@ -459,23 +471,16 @@ func (registry *Registry) Resolve(
 		return Incident{}, err
 	}
 
-	current, exists := registry.incidentsByID[command.IncidentID]
-	if !exists {
-		return Incident{}, fmt.Errorf(
-			"%w: incident %q",
-			ErrIncidentNotFound,
-			command.IncidentID,
-		)
-	}
-
-	if current.Version != command.ExpectedVersion {
-		return Incident{}, fmt.Errorf(
-			"%w: incident %q current=%d expected=%d",
-			ErrVersionConflict,
-			command.IncidentID,
-			current.Version,
-			command.ExpectedVersion,
-		)
+	current, err := registry.validateVerificationFenceLocked(
+		verificationFence{
+			IncidentID:      command.IncidentID,
+			ExpectedVersion: command.ExpectedVersion,
+			HolderID:        command.HolderID,
+			Now:             command.Now,
+		},
+	)
+	if err != nil {
+		return Incident{}, err
 	}
 
 	if current.State != StateVerifying {

@@ -35,6 +35,7 @@ type incidentRegistryHandle struct {
 	ActionAttempts        remediationdomain.ActionAttemptStore
 	Verifications         remediationdomain.VerificationStore
 	VerificationLifecycle incidentVerificationLifecycle
+	VerificationWorker    verificationWorkerLifecycle
 	close                 func()
 }
 
@@ -71,6 +72,7 @@ func openIncidentRegistry(
 				NewMemoryActionAttemptStore(),
 			Verifications:         verificationStore,
 			VerificationLifecycle: registry,
+			VerificationWorker:    registry,
 			close:                 func() {},
 		}, nil
 	case "postgres":
@@ -142,6 +144,7 @@ func openIncidentRegistry(
 
 			Verifications:         verificationStore,
 			VerificationLifecycle: registry,
+			VerificationWorker:    registry,
 			close:                 pool.Close,
 		}, nil
 

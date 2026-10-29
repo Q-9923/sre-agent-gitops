@@ -153,12 +153,24 @@ func TestRegistryResolveRejectsPersistedPendingVerification(
 		)
 	}
 
+	resolutionAt := now.Add(20 * time.Second)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  pendingVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -197,11 +209,11 @@ func TestRegistryResolveRejectsPersistedPendingVerification(
 			incidentdomain.StateVerifying,
 		)
 	}
-	if current.Version != verifying.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			verifying.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {
@@ -276,12 +288,33 @@ func TestRegistryResolveRejectsMissingVerification(
 		)
 	}
 
+	resolutionAt := time.Date(
+		2026,
+		time.October,
+		5,
+		15,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  "ver-missing",
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -320,11 +353,11 @@ func TestRegistryResolveRejectsMissingVerification(
 			incidentdomain.StateVerifying,
 		)
 	}
-	if current.Version != verifying.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			verifying.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {
@@ -511,12 +544,24 @@ func TestRegistryResolveRejectsRecoveredVerificationFromAnotherIncident(
 		t.Fatalf("Verification Complete() error = %v", err)
 	}
 
+	resolutionAt := now.Add(20 * time.Second)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -558,11 +603,11 @@ func TestRegistryResolveRejectsRecoveredVerificationFromAnotherIncident(
 			incidentdomain.StateVerifying,
 		)
 	}
-	if current.Version != verifying.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			verifying.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {
@@ -634,12 +679,33 @@ func TestRegistryResolveFailsClosedWithoutRecoveryEvidenceStore(
 		)
 	}
 
+	resolutionAt := time.Date(
+		2026,
+		time.October,
+		5,
+		16,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  "ver-store-unavailable",
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -679,11 +745,11 @@ func TestRegistryResolveFailsClosedWithoutRecoveryEvidenceStore(
 			incidentdomain.StateVerifying,
 		)
 	}
-	if current.Version != verifying.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			verifying.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {
@@ -826,12 +892,24 @@ func TestRegistryResolveRejectsIncidentThatIsNotVerifying(
 		t.Fatalf("Verification Complete() error = %v", err)
 	}
 
+	resolutionAt := now.Add(20 * time.Second)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		diagnosed,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      diagnosed.ID,
-			ExpectedVersion: diagnosed.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -867,11 +945,11 @@ func TestRegistryResolveRejectsIncidentThatIsNotVerifying(
 			incidentdomain.StateDiagnosed,
 		)
 	}
-	if current.Version != diagnosed.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			diagnosed.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {
@@ -1031,12 +1109,24 @@ func TestRegistryResolveRejectsStaleIncidentVersion(
 		t.Fatalf("Verification Complete() error = %v", err)
 	}
 
+	resolutionAt := now.Add(20 * time.Second)
+	claim := claimIncidentForResolution(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"verification-worker",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: diagnosed.Version,
+			ExpectedVersion: verifying.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "test-suite",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -1072,11 +1162,11 @@ func TestRegistryResolveRejectsStaleIncidentVersion(
 			incidentdomain.StateVerifying,
 		)
 	}
-	if current.Version != verifying.Version {
+	if current.Version != claim.Incident.Version {
 		t.Fatalf(
 			"Incident Version = %d; want unchanged %d",
 			current.Version,
-			verifying.Version,
+			claim.Incident.Version,
 		)
 	}
 	if current.ResolutionVerificationID != "" {

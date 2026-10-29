@@ -87,6 +87,21 @@ Agent 只能对已持久化的 `PENDING` Verification，基于其稳定 Verifica
 Agent 只能在 Incident 仍处于 `VERIFYING`，且 Incident 版本、Claim Holder、未过期 Lease 与已持久化 Claim Audit 全部匹配时，将对应 `PENDING` Verification 原子持久化为 `RECOVERED`、`NOT_RECOVERED` 或 `INCONCLUSIVE`。相同参数的精确重试必须返回同一终态结果，不得再次推进 Incident 或 Verification 版本；旧 Holder、过期 Lease、版本冲突、缺失 Claim Audit 或 Verification 写入失败必须失败关闭且不得改变已有状态。本接缝不直接将 Incident 迁移到 `RESOLVED`。
 _Avoid_: Unfenced Verification Result, Incident Resolution
 
+**Recovered Verification Resolution Claim**:
+对已持久化为 `RECOVERED`、所属 Incident 仍为 `VERIFYING` 且尚未绑定 Resolution Verification 的恢复结论取得的限时排他推进权；它只允许重试 Incident Resolution，不得再次执行 Verification。Resolve 失败后，Lease 到期即可由新的 Lease Holder 重新竞争；Incident 成功进入 `RESOLVED` 后，该工作不再可被发现。
+_Avoid_: Verification Execution, Verification Retry
+
+**Fenced Incident Resolution**:
+即使 Verification 已持久化为 `RECOVERED`，Agent 也只能在 Incident 仍处于 `VERIFYING`，且 Incident 版本、Claim Holder、未过期 Lease 与已持久化 Claim Audit 全部匹配时原子迁移到 `RESOLVED`。旧 Holder、过期 Lease、版本冲突、缺失 Claim Audit、跨 Incident Evidence 或审计写入失败必须失败关闭且不得改变 Incident；恢复证据本身不授予推进权。
+_Avoid_: Evidence-only Resolution, Unfenced Resolve
+
+**Agent Verification Worker**:
+持续恢复循环先尝试认领已经持久化为 `RECOVERED` 的 Resolution 工作，再认领 `PENDING` Verification。对 PENDING 工作只运行有界 Kubernetes 检查、通过 Fenced Verification Complete 持久化终态，并且只在终态为 `RECOVERED` 时 Resolve Incident。每个失败点必须返回稳定错误、记录结构化工作身份并使用有上限的指数退避；正常取消不得记录为失败，无工作时必须等待下一 Poll。
+_Avoid_: Action Replay, Unbounded Poller, Best-effort Completion
+
+**ReplicaSet Recovery Evidence**:
+针对 `ReplicaSet` Verification Subject 的 Kubernetes 恢复证据：Subject 的集群、名称和 UID 必须仍匹配，控制器状态必须观察到当前 generation 且期望副本数为正，并且必须存在足量、非 terminating、Ready、由该 ReplicaSet 控制且 UID 不等于原 Action Target 的替代 Pod。GET/List 失败、对象 NotFound、UID 改变、非法 selector 或上下文取消均失败关闭，不得降级为 `NOT_RECOVERED`。
+_Avoid_: ReplicaSet Status Alone, Original Pod, Foreign Owner
 **Resolution Evidence**:
 指向已持久化且状态为 `RECOVERED` 的 Verification；只有其 Action Key 归属当前 Incident 时，才能结束 Verifying Incident。
 _Avoid_: Action Attempt Result, Evidence Code

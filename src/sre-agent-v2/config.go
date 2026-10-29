@@ -190,6 +190,13 @@ func (config agentConfig) validate() error {
 			"INCIDENT_CLAIM_LEASE_DURATION must be greater than zero",
 		)
 	}
+	if config.IncidentClaimLeaseDuration <=
+		config.KubernetesRequestTimeout {
+		return fmt.Errorf(
+			"INCIDENT_CLAIM_LEASE_DURATION must be greater than " +
+				"KUBERNETES_REQUEST_TIMEOUT",
+		)
+	}
 	if strings.TrimSpace(config.IncidentClaimHolderID) == "" {
 		return fmt.Errorf(
 			"INCIDENT_CLAIM_HOLDER_ID must not be empty",

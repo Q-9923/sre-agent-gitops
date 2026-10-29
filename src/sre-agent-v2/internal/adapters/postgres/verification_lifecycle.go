@@ -41,6 +41,17 @@ func verificationFenceFromComplete(
 	}
 }
 
+func verificationFenceFromResolve(
+	command incidentdomain.ResolveCommand,
+) verificationFence {
+	return verificationFence{
+		IncidentID:      command.IncidentID,
+		ExpectedVersion: command.ExpectedVersion,
+		HolderID:        command.HolderID,
+		Now:             command.Now,
+	}
+}
+
 type verificationBeginQuerier interface {
 	QueryRow(
 		context.Context,

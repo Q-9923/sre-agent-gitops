@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -154,12 +155,24 @@ func TestRegistryResolvePersistsRecoveredVerificationAtomicallyPostgreSQL(
 		t.Fatalf("Verification Complete() error = %v", err)
 	}
 
+	resolutionAt := recoveredVerification.FinishedAt.Add(time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		verifying,
+		"agent-action-attempt",
+		resolutionAt,
+	)
+
 	resolved, err := registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      verifying.ID,
-			ExpectedVersion: verifying.Version,
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "sre-agent",
 			ReasonCode:      "RECOVERY_VERIFIED",
 		},
@@ -174,11 +187,11 @@ func TestRegistryResolvePersistsRecoveredVerificationAtomicallyPostgreSQL(
 			incidentdomain.StateResolved,
 		)
 	}
-	if resolved.Version != verifying.Version+1 {
+	if resolved.Version != claim.Incident.Version+1 {
 		t.Fatalf(
 			"resolved Version = %d; want %d",
 			resolved.Version,
-			verifying.Version+1,
+			claim.Incident.Version+1,
 		)
 	}
 	if resolved.ResolutionVerificationID != recoveredVerification.ID {
@@ -225,11 +238,11 @@ WHERE id = $1
 			incidentdomain.StateResolved,
 		)
 	}
-	if persistedVersion != int64(verifying.Version+1) {
+	if persistedVersion != int64(claim.Incident.Version+1) {
 		t.Fatalf(
 			"persisted Version = %d; want %d",
 			persistedVersion,
-			verifying.Version+1,
+			claim.Incident.Version+1,
 		)
 	}
 	if persistedVerificationID != recoveredVerification.ID {
@@ -390,13 +403,27 @@ CHECK (to_state <> 'RESOLVED')
 	}
 
 	registry := NewRegistry(pool)
+	resolutionAt := verificationFinishedAt.Add(time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		incidentdomain.Incident{
+			ID:      incidentID,
+			Version: uint64(expectedIncidentVersion),
+		},
+		"agent-action-attempt",
+		resolutionAt,
+	)
 
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      incidentID,
-			ExpectedVersion: uint64(expectedIncidentVersion),
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "integration-test",
 			ReasonCode:      "WORKLOAD_RECOVERED",
 		},
@@ -446,11 +473,11 @@ WHERE id = $1
 			incidentdomain.StateVerifying,
 		)
 	}
-	if persistedVersion != expectedIncidentVersion {
+	if persistedVersion != int64(claim.Incident.Version) {
 		t.Fatalf(
 			"persisted Incident version = %d; want unchanged %d",
 			persistedVersion,
-			expectedIncidentVersion,
+			claim.Incident.Version,
 		)
 	}
 	if !resolvedAtIsNull {
@@ -605,13 +632,27 @@ RETURNING version
 	}
 
 	registry := NewRegistry(pool)
+	resolutionAt := actionFinishedAt.Add(2 * time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		incidentdomain.Incident{
+			ID:      incidentID,
+			Version: uint64(expectedIncidentVersion),
+		},
+		"agent-action-attempt",
+		resolutionAt,
+	)
 
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      incidentID,
-			ExpectedVersion: uint64(expectedIncidentVersion),
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  pendingVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "integration-test",
 			ReasonCode:      "WORKLOAD_RECOVERED",
 		},
@@ -661,11 +702,11 @@ WHERE id = $1
 			incidentdomain.StateVerifying,
 		)
 	}
-	if persistedVersion != expectedIncidentVersion {
+	if persistedVersion != int64(claim.Incident.Version) {
 		t.Fatalf(
 			"persisted Incident version = %d; want unchanged %d",
 			persistedVersion,
-			expectedIncidentVersion,
+			claim.Incident.Version,
 		)
 	}
 	if !resolvedAtIsNull {
@@ -895,12 +936,27 @@ RETURNING version
 		)
 	}
 
+	resolutionAt := verificationFinishedAt.Add(time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		incidentdomain.Incident{
+			ID:      foreignIncident.ID,
+			Version: uint64(expectedForeignVersion),
+		},
+		"agent-action-attempt",
+		resolutionAt,
+	)
+
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
 			IncidentID:      foreignIncident.ID,
-			ExpectedVersion: uint64(expectedForeignVersion),
+			ExpectedVersion: claim.Incident.Version,
 			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
 			Actor:           "integration-test",
 			ReasonCode:      "WORKLOAD_RECOVERED",
 		},
@@ -950,11 +1006,11 @@ WHERE id = $1
 			incidentdomain.StateVerifying,
 		)
 	}
-	if persistedVersion != expectedForeignVersion {
+	if persistedVersion != int64(claim.Incident.Version) {
 		t.Fatalf(
 			"persisted Incident version = %d; want unchanged %d",
 			persistedVersion,
-			expectedForeignVersion,
+			claim.Incident.Version,
 		)
 	}
 	if !resolvedAtIsNull {
@@ -1123,17 +1179,29 @@ RETURNING version
 	}
 
 	registry := NewRegistry(pool)
+	resolutionAt := verificationFinishedAt.Add(time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		incidentdomain.Incident{
+			ID:      incidentID,
+			Version: uint64(currentIncidentVersion),
+		},
+		"agent-action-attempt",
+		resolutionAt,
+	)
 
 	_, err = registry.Resolve(
 		ctx,
 		incidentdomain.ResolveCommand{
-			IncidentID: incidentID,
-			ExpectedVersion: uint64(
-				currentIncidentVersion - 1,
-			),
-			VerificationID: recoveredVerification.ID,
-			Actor:          "stale-integration-test",
-			ReasonCode:     "WORKLOAD_RECOVERED",
+			IncidentID:      incidentID,
+			ExpectedVersion: uint64(currentIncidentVersion),
+			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
+			Actor:           "stale-integration-test",
+			ReasonCode:      "WORKLOAD_RECOVERED",
 		},
 	)
 	if err == nil {
@@ -1181,11 +1249,11 @@ WHERE id = $1
 			incidentdomain.StateVerifying,
 		)
 	}
-	if persistedVersion != currentIncidentVersion {
+	if persistedVersion != int64(claim.Incident.Version) {
 		t.Fatalf(
 			"persisted Incident version = %d; want unchanged %d",
 			persistedVersion,
-			currentIncidentVersion,
+			claim.Incident.Version,
 		)
 	}
 	if !resolvedAtIsNull {
@@ -1223,4 +1291,254 @@ WHERE incident_id = $1
 			resolutionAuditCount,
 		)
 	}
+}
+func TestRegistryResolveRequiresActiveAuditedClaimPostgreSQL(
+	t *testing.T,
+) {
+	pool, beginAttemptCommand := newActionAttemptPostgresFixture(
+		t,
+		"registry-resolution-fence",
+	)
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		2*time.Minute,
+	)
+	t.Cleanup(cancel)
+
+	incidentID := beginAttemptCommand.Key.IncidentID
+	var verifyingVersion int64
+
+	err := pool.QueryRow(
+		ctx,
+		`
+UPDATE incidents
+SET
+    state = 'VERIFYING',
+    version = version + 1
+WHERE id = $1
+RETURNING version
+`,
+		incidentID,
+	).Scan(&verifyingVersion)
+	if err != nil {
+		t.Fatalf("prepare VERIFYING Incident error = %v", err)
+	}
+
+	actionAttempts := NewActionAttemptStore(pool)
+	startedAttempt, created, err := actionAttempts.Begin(
+		ctx,
+		beginAttemptCommand,
+	)
+	if err != nil {
+		t.Fatalf("ActionAttempt Begin() error = %v", err)
+	}
+	if !created {
+		t.Fatal("ActionAttempt Begin() created = false; want true")
+	}
+
+	actionFinishedAt := beginAttemptCommand.StartedAt.Add(time.Second)
+	succeededAttempt, err := actionAttempts.Complete(
+		ctx,
+		remediationdomain.CompleteActionAttemptCommand{
+			Key:             beginAttemptCommand.Key,
+			ExpectedVersion: startedAttempt.Version,
+			To: remediationdomain.
+				ActionAttemptStatusSucceeded,
+			FinishedAt: actionFinishedAt,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ActionAttempt Complete() error = %v", err)
+	}
+
+	verifications := NewVerificationStore(pool)
+	pendingVerification, created, err := verifications.Begin(
+		ctx,
+		remediationdomain.BeginVerificationCommand{
+			ActionAttempt: succeededAttempt,
+			Subject: remediationdomain.VerificationSubject{
+				Cluster:   "dev",
+				Namespace: "default",
+				Kind:      "Pod",
+				Name:      "crash-app-registry-resolution-fence",
+				UID:       beginAttemptCommand.Key.TargetUID,
+			},
+			StartedAt: actionFinishedAt.Add(time.Second),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Verification Begin() error = %v", err)
+	}
+	if !created {
+		t.Fatal("Verification Begin() created = false; want true")
+	}
+
+	recoveredVerification, err := verifications.Complete(
+		ctx,
+		remediationdomain.CompleteVerificationCommand{
+			ActionKey:       beginAttemptCommand.Key.ActionKey(),
+			ExpectedVersion: pendingVerification.Version,
+			To: remediationdomain.
+				VerificationStatusRecovered,
+			FinishedAt:   actionFinishedAt.Add(2 * time.Second),
+			EvidenceCode: "WORKLOAD_READY",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Verification Complete() error = %v", err)
+	}
+
+	registry := NewRegistry(pool)
+	resolutionAt := actionFinishedAt.Add(3 * time.Second)
+	claim := claimIncidentForResolutionPostgreSQL(
+		t,
+		ctx,
+		registry,
+		incidentdomain.Incident{
+			ID:      incidentID,
+			Version: uint64(verifyingVersion),
+		},
+		"agent-action-attempt",
+		resolutionAt,
+	)
+
+	tests := []struct {
+		name     string
+		holderID string
+		now      time.Time
+	}{
+		{
+			name:     "wrong_holder",
+			holderID: "stale-verification-worker",
+			now:      resolutionAt,
+		},
+		{
+			name:     "expired_lease",
+			holderID: claim.HolderID,
+			now:      claim.ExpiresAt,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, resolveErr := registry.Resolve(
+				ctx,
+				incidentdomain.ResolveCommand{
+					IncidentID:      incidentID,
+					ExpectedVersion: claim.Incident.Version,
+					VerificationID:  recoveredVerification.ID,
+					HolderID:        test.holderID,
+					Now:             test.now,
+					Actor:           test.holderID,
+					ReasonCode:      "RECOVERY_VERIFIED",
+				},
+			)
+			if !errors.Is(
+				resolveErr,
+				incidentdomain.ErrVerificationFenceConflict,
+			) {
+				t.Fatalf(
+					"Resolve() error = %v; "+
+						"want ErrVerificationFenceConflict",
+					resolveErr,
+				)
+			}
+		})
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		`
+DELETE FROM incident_claims
+WHERE incident_id = $1
+  AND incident_version = $2
+`,
+		incidentID,
+		claim.Incident.Version,
+	)
+	if err != nil {
+		t.Fatalf("delete current Claim Audit error = %v", err)
+	}
+
+	_, err = registry.Resolve(
+		ctx,
+		incidentdomain.ResolveCommand{
+			IncidentID:      incidentID,
+			ExpectedVersion: claim.Incident.Version,
+			VerificationID:  recoveredVerification.ID,
+			HolderID:        claim.HolderID,
+			Now:             resolutionAt,
+			Actor:           claim.HolderID,
+			ReasonCode:      "RECOVERY_VERIFIED",
+		},
+	)
+	if !errors.Is(
+		err,
+		incidentdomain.ErrVerificationFenceConflict,
+	) {
+		t.Fatalf(
+			"Resolve() without Claim Audit error = %v; "+
+				"want ErrVerificationFenceConflict",
+			err,
+		)
+	}
+
+	var (
+		persistedState   string
+		persistedVersion int64
+	)
+	err = pool.QueryRow(
+		ctx,
+		`
+SELECT state, version
+FROM incidents
+WHERE id = $1
+`,
+		incidentID,
+	).Scan(&persistedState, &persistedVersion)
+	if err != nil {
+		t.Fatalf("reload fenced Incident error = %v", err)
+	}
+	if persistedState != string(incidentdomain.StateVerifying) {
+		t.Fatalf(
+			"persisted Incident state = %q; want %q",
+			persistedState,
+			incidentdomain.StateVerifying,
+		)
+	}
+	if persistedVersion != int64(claim.Incident.Version) {
+		t.Fatalf(
+			"persisted Incident version = %d; want unchanged %d",
+			persistedVersion,
+			claim.Incident.Version,
+		)
+	}
+}
+
+func claimIncidentForResolutionPostgreSQL(
+	t *testing.T,
+	ctx context.Context,
+	registry *Registry,
+	current incidentdomain.Incident,
+	holderID string,
+	now time.Time,
+) incidentdomain.Claim {
+	t.Helper()
+
+	claim, err := registry.Claim(
+		ctx,
+		incidentdomain.ClaimCommand{
+			IncidentID:      current.ID,
+			ExpectedVersion: current.Version,
+			HolderID:        holderID,
+			Now:             now,
+			LeaseDuration:   time.Minute,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Claim() for resolution error = %v", err)
+	}
+
+	return claim
 }

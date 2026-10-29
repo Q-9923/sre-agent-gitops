@@ -96,16 +96,12 @@ func main() {
 	agent := newSREAgent(
 		config,
 		kubernetesClient,
-		incidentHandle.Registry,
-		incidentHandle.Approvals,
+		incidentHandle,
 		logger,
 		liveness.markProgress,
 		readiness.markSuccessfulCycle,
 		metrics.recordCycle,
 	)
-	agent.plans = incidentHandle.Plans
-	agent.actionAttempts = incidentHandle.ActionAttempts
-	agent.verifications = incidentHandle.Verifications
 	applicationErr := runApplication(
 		ctx,
 		healthListener,
@@ -113,8 +109,6 @@ func main() {
 		operationalHandler,
 	)
 	incidentHandle.Close()
-	agent.verificationLifecycle =
-		incidentHandle.VerificationLifecycle
 
 	if applicationErr != nil {
 		logger.Error(

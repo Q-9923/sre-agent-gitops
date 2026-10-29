@@ -203,13 +203,25 @@ func NewMemoryVerificationStore() *MemoryVerificationStore {
 func (store *MemoryVerificationStore) ListPending(
 	ctx context.Context,
 ) ([]Verification, error) {
+	return store.listByStatus(ctx, VerificationStatusPending)
+}
+
+func (store *MemoryVerificationStore) ListRecovered(
+	ctx context.Context,
+) ([]Verification, error) {
+	return store.listByStatus(ctx, VerificationStatusRecovered)
+}
+
+func (store *MemoryVerificationStore) listByStatus(
+	ctx context.Context,
+	status VerificationStatus,
+) ([]Verification, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf(
 			"%w: context is required",
 			ErrInvalidVerification,
 		)
 	}
-
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -217,22 +229,24 @@ func (store *MemoryVerificationStore) ListPending(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	pending := make([]Verification, 0)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
+	matching := make([]Verification, 0)
 	for _, verification := range store.verifications {
-		if verification.Status != VerificationStatusPending {
+		if verification.Status != status {
 			continue
 		}
 
-		pending = append(
-			pending,
+		matching = append(
+			matching,
 			cloneVerification(verification),
 		)
 	}
 
-	return pending, nil
+	return matching, nil
 }
-
 func (store *MemoryVerificationStore) RequireRecovered(
 	ctx context.Context,
 	verificationID string,

@@ -694,3 +694,258 @@ func TestRegistryClaimPendingVerificationSurvivesAdapterRestartAndLeaseExpiryPos
 		)
 	}
 }
+
+func TestRegistryClaimRecoveredVerificationResolutionSurvivesAdapterRestartAndLeaseExpiryPostgreSQL(
+	t *testing.T,
+) {
+	fixture := newPostgresFencedVerificationRollbackFixture(
+		t,
+		"recovered-resolution-adapter-restart",
+		"crash-app-recovered-resolution-adapter-restart",
+	)
+
+	fenced, err := fixture.registry.BeginFencedVerification(
+		fixture.ctx,
+		fixture.command,
+	)
+	if err != nil {
+		t.Fatalf(
+			"BeginFencedVerification() error = %v",
+			err,
+		)
+	}
+	if !fenced.Created {
+		t.Fatal(
+			"BeginFencedVerification() Created = false; want true",
+		)
+	}
+
+	schedulerNow := fixture.claim.ExpiresAt.Add(time.Second)
+	schedulerLeaseDuration := 30 * time.Second
+	schedulerHolderID := "verification-result-scheduler"
+
+	schedulerRegistry := NewRegistry(fixture.pool)
+
+	scheduled, found, err :=
+		schedulerRegistry.ClaimPendingVerification(
+			fixture.ctx,
+			incidentdomain.ClaimPendingVerificationCommand{
+				HolderID:      schedulerHolderID,
+				Now:           schedulerNow,
+				LeaseDuration: schedulerLeaseDuration,
+			},
+		)
+	if err != nil {
+		t.Fatalf(
+			"ClaimPendingVerification() error = %v",
+			err,
+		)
+	}
+	if !found {
+		t.Fatal(
+			"ClaimPendingVerification() found = false; want true",
+		)
+	}
+
+	completedAt := schedulerNow.Add(time.Second)
+
+	completed, err :=
+		schedulerRegistry.CompleteFencedVerification(
+			fixture.ctx,
+			incidentdomain.CompleteFencedVerificationCommand{
+				IncidentID: scheduled.Claim.Incident.ID,
+				ExpectedVersion: scheduled.Claim.Incident.
+					Version,
+				HolderID: schedulerHolderID,
+				Now:      completedAt,
+				Verification: remediationdomain.
+					CompleteVerificationCommand{
+					ActionKey: scheduled.Verification.ActionKey,
+					ExpectedVersion: scheduled.Verification.
+						Version,
+					To: remediationdomain.
+						VerificationStatusRecovered,
+					FinishedAt: completedAt,
+					EvidenceCode: "WORKLOAD_RECOVERED_" +
+						"BEFORE_RESOLUTION_RESTART",
+				},
+			},
+		)
+	if err != nil {
+		t.Fatalf(
+			"CompleteFencedVerification() error = %v",
+			err,
+		)
+	}
+	if completed.Verification.Status !=
+		remediationdomain.VerificationStatusRecovered {
+		t.Fatalf(
+			"completed Verification Status = %q; want %q",
+			completed.Verification.Status,
+			remediationdomain.VerificationStatusRecovered,
+		)
+	}
+	if completed.Incident.State !=
+		incidentdomain.StateVerifying {
+		t.Fatalf(
+			"completed Incident State = %q; want %q",
+			completed.Incident.State,
+			incidentdomain.StateVerifying,
+		)
+	}
+	if completed.Incident.ResolutionVerificationID != "" {
+		t.Fatalf(
+			"completed Incident ResolutionVerificationID = %q; want empty",
+			completed.Incident.ResolutionVerificationID,
+		)
+	}
+
+	restartedRegistry := NewRegistry(fixture.pool)
+
+	claimAt := scheduled.Claim.ExpiresAt.Add(time.Second)
+	resolutionLeaseDuration := 45 * time.Second
+	resolutionHolderID := "verification-resolution-scheduler"
+
+	work, found, err :=
+		restartedRegistry.ClaimRecoveredVerificationResolution(
+			fixture.ctx,
+			incidentdomain.
+				ClaimRecoveredVerificationResolutionCommand{
+				HolderID:      resolutionHolderID,
+				Now:           claimAt,
+				LeaseDuration: resolutionLeaseDuration,
+			},
+		)
+	if err != nil {
+		t.Fatalf(
+			"ClaimRecoveredVerificationResolution() error = %v",
+			err,
+		)
+	}
+	if !found {
+		t.Fatal(
+			"ClaimRecoveredVerificationResolution() found = false; " +
+				"want true",
+		)
+	}
+
+	if work.Verification.ID != completed.Verification.ID {
+		t.Fatalf(
+			"claimed Verification ID = %q; want %q",
+			work.Verification.ID,
+			completed.Verification.ID,
+		)
+	}
+	if work.Verification.ActionKey !=
+		completed.Verification.ActionKey {
+		t.Fatalf(
+			"claimed Verification ActionKey = %#v; want %#v",
+			work.Verification.ActionKey,
+			completed.Verification.ActionKey,
+		)
+	}
+	if work.Verification.Status !=
+		remediationdomain.VerificationStatusRecovered {
+		t.Fatalf(
+			"claimed Verification Status = %q; want %q",
+			work.Verification.Status,
+			remediationdomain.VerificationStatusRecovered,
+		)
+	}
+
+	if work.Claim.Incident.ID != completed.Incident.ID {
+		t.Fatalf(
+			"claimed Incident ID = %q; want %q",
+			work.Claim.Incident.ID,
+			completed.Incident.ID,
+		)
+	}
+	if work.Claim.Incident.State !=
+		incidentdomain.StateVerifying {
+		t.Fatalf(
+			"claimed Incident State = %q; want %q",
+			work.Claim.Incident.State,
+			incidentdomain.StateVerifying,
+		)
+	}
+
+	expectedIncidentVersion := completed.Incident.Version + 1
+	if work.Claim.Incident.Version != expectedIncidentVersion {
+		t.Fatalf(
+			"claimed Incident Version = %d; want %d",
+			work.Claim.Incident.Version,
+			expectedIncidentVersion,
+		)
+	}
+	if work.Claim.Incident.ResolutionVerificationID != "" {
+		t.Fatalf(
+			"claimed Incident ResolutionVerificationID = %q; want empty",
+			work.Claim.Incident.ResolutionVerificationID,
+		)
+	}
+	if work.Claim.HolderID != resolutionHolderID {
+		t.Fatalf(
+			"claimed HolderID = %q; want %q",
+			work.Claim.HolderID,
+			resolutionHolderID,
+		)
+	}
+
+	expectedExpiry := claimAt.Add(resolutionLeaseDuration)
+	if !work.Claim.ExpiresAt.Equal(expectedExpiry) {
+		t.Fatalf(
+			"claimed ExpiresAt = %s; want %s",
+			work.Claim.ExpiresAt,
+			expectedExpiry,
+		)
+	}
+
+	history, err := restartedRegistry.ClaimHistory(
+		fixture.ctx,
+		completed.Incident.ID,
+	)
+	if err != nil {
+		t.Fatalf(
+			"ClaimHistory() error = %v",
+			err,
+		)
+	}
+
+	var resolutionAuditFound bool
+
+	for _, event := range history {
+		if event.HolderID != resolutionHolderID {
+			continue
+		}
+
+		if event.IncidentVersion != expectedIncidentVersion {
+			t.Fatalf(
+				"resolution ClaimAudit IncidentVersion = %d; want %d",
+				event.IncidentVersion,
+				expectedIncidentVersion,
+			)
+		}
+		if !event.AcquiredAt.Equal(claimAt) {
+			t.Fatalf(
+				"resolution ClaimAudit AcquiredAt = %s; want %s",
+				event.AcquiredAt,
+				claimAt,
+			)
+		}
+		if !event.ExpiresAt.Equal(expectedExpiry) {
+			t.Fatalf(
+				"resolution ClaimAudit ExpiresAt = %s; want %s",
+				event.ExpiresAt,
+				expectedExpiry,
+			)
+		}
+
+		resolutionAuditFound = true
+	}
+
+	if !resolutionAuditFound {
+		t.Fatal(
+			"ClaimHistory() has no recovered-resolution scheduler audit",
+		)
+	}
+}

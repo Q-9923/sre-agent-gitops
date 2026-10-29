@@ -2,10 +2,7 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
 
 	incidentdomain "sre-agent/internal/incident"
 	remediationdomain "sre-agent/internal/remediation"
@@ -149,100 +146,27 @@ INNER JOIN audited
 	AND audited.incident_version = claimed.version
 `
 
-	var (
-		result              incidentdomain.PendingVerificationClaim
-		verificationStatus  string
-		verificationVersion int64
-		incidentState       string
-		incidentVersion     int64
-	)
+	var result incidentdomain.PendingVerificationClaim
 
-	err := registry.pool.QueryRow(
-		ctx,
-		query,
-		command.HolderID,
-		command.Now,
-		expiresAt,
-	).Scan(
-		&result.Verification.ID,
-		&result.Verification.ActionAttemptID,
-		&result.Verification.ActionKey.IncidentID,
-		&result.Verification.ActionKey.PlanHash,
-		&result.Verification.ActionKey.TargetUID,
-		&result.Verification.Subject.Cluster,
-		&result.Verification.Subject.Namespace,
-		&result.Verification.Subject.Kind,
-		&result.Verification.Subject.Name,
-		&result.Verification.Subject.UID,
-		&verificationStatus,
-		&verificationVersion,
-		&result.Verification.StartedAt,
-		&result.Verification.FinishedAt,
-		&result.Verification.EvidenceCode,
-		&result.Claim.Incident.ID,
-		&incidentState,
-		&incidentVersion,
-		&result.Claim.HolderID,
-		&result.Claim.ExpiresAt,
+	found, err := scanVerificationClaimRow(
+		registry.pool.QueryRow(
+			ctx,
+			query,
+			command.HolderID,
+			command.Now,
+			expiresAt,
+		),
+		&result.Verification,
+		&result.Claim,
+		remediationdomain.VerificationStatusPending,
+		false,
+		"claim pending Verification",
 	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			nil
-	}
 	if err != nil {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			fmt.Errorf(
-				"claim pending Verification in PostgreSQL: %w",
-				err,
-			)
+		return incidentdomain.PendingVerificationClaim{}, false, err
 	}
-
-	if verificationVersion <= 0 {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			fmt.Errorf(
-				"claim pending Verification returned invalid "+
-					"Verification version %d",
-				verificationVersion,
-			)
-	}
-	if incidentVersion <= 0 {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			fmt.Errorf(
-				"claim pending Verification returned invalid "+
-					"Incident version %d",
-				incidentVersion,
-			)
-	}
-
-	result.Verification.Status =
-		remediationdomain.VerificationStatus(verificationStatus)
-	result.Verification.Version = verificationVersion
-	result.Claim.Incident.State =
-		incidentdomain.State(incidentState)
-	result.Claim.Incident.Version = uint64(incidentVersion)
-
-	if result.Verification.Status !=
-		remediationdomain.VerificationStatusPending {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			fmt.Errorf(
-				"claim pending Verification returned status %q",
-				result.Verification.Status,
-			)
-	}
-	if result.Claim.Incident.State !=
-		incidentdomain.StateVerifying {
-		return incidentdomain.PendingVerificationClaim{},
-			false,
-			fmt.Errorf(
-				"claim pending Verification returned "+
-					"Incident state %q",
-				result.Claim.Incident.State,
-			)
+	if !found {
+		return incidentdomain.PendingVerificationClaim{}, false, nil
 	}
 
 	return result, true, nil

@@ -718,12 +718,12 @@ type agentVerificationExecutorProbe struct {
 
 func (executor *agentVerificationExecutorProbe) Verify(
 	_ context.Context,
-	subject remediationdomain.VerificationSubject,
+	verification remediationdomain.Verification,
 ) (verificationExecutionResult, error) {
 	executor.calls++
 	executor.subjects = append(
 		executor.subjects,
-		subject,
+		verification.Subject,
 	)
 
 	return executor.result, executor.err
@@ -736,7 +736,7 @@ type agentVerificationLateSuccessExecutor struct {
 
 func (executor *agentVerificationLateSuccessExecutor) Verify(
 	ctx context.Context,
-	_ remediationdomain.VerificationSubject,
+	_ remediationdomain.Verification,
 ) (verificationExecutionResult, error) {
 	executor.calls++
 
