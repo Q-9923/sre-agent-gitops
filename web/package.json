@@ -1,0 +1,22 @@
+{
+  "name": "sre-agent-workbench",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "build:contest": "tsc --noEmit -p tsconfig.contest.json && vite build --config vite.contest.config.ts",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "react": "19.3.1", "react-dom": "19.3.1", "echarts": "6.1.0",
+    "motion": "14.9.0", "lucide-react": "1.66.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0", "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1", "vite": "8.3.5", "typescript": "7.0.2",
+    "@playwright/test": "1.64.1"
+  }
+}
